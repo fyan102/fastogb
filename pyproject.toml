@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faster-rule"
+version = "0.1.0"
+description = "Additive rule ensembles with exact and approximate query search"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0,<2.4; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy>=2.0,<2.5; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "numba>=0.61.2,<0.63; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numba>=0.66,<0.67; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "llvmlite>=0.45,<0.46; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "llvmlite>=0.48,<0.49; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+cuda = ["numba-cuda"]
+evaluation = ["scikit-learn>=1.5"]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+include = ["fastogb*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["NPY201"]
