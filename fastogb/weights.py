@@ -6,14 +6,13 @@ import numpy as np
 from scipy.optimize import minimize, minimize_scalar
 
 from fastogb.losses import LogisticLoss, PoissonLoss, SquaredLoss, loss_function
+from fastogb.prediction import evaluate_rule_queries
 
 
 def rule_matrix(data, rules):
     """Evaluate rule queries once and return a dense sample-by-rule matrix."""
-    if not len(rules):
-        return np.empty((len(data), 0), dtype=np.float64)
-    columns = [np.asarray(rule.q(data), dtype=np.float64) for rule in rules]
-    return np.ascontiguousarray(np.column_stack(columns), dtype=np.float64)
+    method = getattr(rules, 'query_matrix', None)
+    return method(data) if method is not None else evaluate_rule_queries(data, rules)
 
 
 class WeightUpdateMethod:

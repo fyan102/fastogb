@@ -95,7 +95,7 @@ class GeneralRuleBoostingEstimator:
         self.objective_params = objective_params
         self.max_components = max_components
         self.n_jobs = n_jobs
-        self.rules_ = AdditiveRuleEnsemble([])
+        self.rules_ = AdditiveRuleEnsemble(n_jobs=n_jobs)
 
     def get_params(self, deep=True):
         """Return the estimator configuration.
@@ -206,6 +206,7 @@ class GeneralRuleBoostingEstimator:
         params = _default_search_params(self.search_params, self.max_col_attr)
         self.search_params_ = params.copy()
         self.n_jobs_ = resolve_numba_jobs(params.get('n_jobs', self.n_jobs))
+        self.rules_.n_jobs = self.n_jobs_
         runtime_params = params.copy()
         runtime_params.setdefault('n_jobs', self.n_jobs_)
         feature_names = infer_feature_names(data, values.shape[1], params.get('feature_names'))
@@ -218,7 +219,7 @@ class GeneralRuleBoostingEstimator:
         self.feature_names_in_ = np.asarray(feature_names)
         self.context_matrix_ = context_matrix
         if not continuing:
-            self.rules_ = AdditiveRuleEnsemble()
+            self.rules_ = AdditiveRuleEnsemble(n_jobs=self.n_jobs_)
         self.history = []
         self.history_ = self.history
         self.time = []
@@ -345,8 +346,7 @@ class GeneralRuleBoostingEstimator:
             self.training_rule_matrix_ = np.empty((len(data), 0), dtype=np.float64)
             self._training_scores_ = np.zeros(len(data), dtype=np.float64)
             return
-        columns = [np.asarray(rule.q(data), dtype=np.float64) for rule in self.rules_]
-        self.training_rule_matrix_ = np.ascontiguousarray(np.column_stack(columns))
+        self.training_rule_matrix_ = self.rules_.query_matrix(data, self.n_jobs_)
         weights = np.asarray([rule.y for rule in self.rules_], dtype=np.float64)
         self._training_scores_ = self.training_rule_matrix_ @ weights
 
@@ -384,6 +384,8 @@ class GeneralRuleBoostingEstimator:
         """
         self._check_fitted()
         values = as_2d_array(data)
+        if self.rules_.supports_compiled(values):
+            return self.rules_(values)
         if self._prediction_plan_ is None:
             return self.rules_(values)
         work = len(values) * max(len(self._prediction_encoder_indices_), 1)

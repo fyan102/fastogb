@@ -1,6 +1,7 @@
 """Fast NumPy-first additive rule ensembles."""
 
 from fastogb.csv_data import load_csv
+from fastogb.collections import RuleEnsembleCollection
 from fastogb.encoding import PropositionEncoder
 from fastogb.estimators import GeneralRuleBoostingEstimator
 from fastogb.logic import Conjunction, Constraint, KeyValueProposition
@@ -16,4 +17,4 @@ __all__ = ['AdditiveRuleEnsemble', 'Conjunction', 'Constraint', 'Context', 'Core
            'GeneralRuleBoostingEstimator', 'GradientBoostingObjectiveGPE', 'GradientBoostingObjectiveMWG',
            'GradientBoostingObjectiveXGB', 'GreedySearch', 'KeepWeight', 'KeyValueProposition', 'LineSearch',
            'LinearTerm', 'LogisticLoss', 'OrthogonalBeamSearch', 'OrthogonalBoostingObjective', 'PoissonLoss',
-           'PropositionEncoder', 'Rule', 'SquaredLoss', 'load_csv', 'loss_function']
+           'PropositionEncoder', 'Rule', 'RuleEnsembleCollection', 'SquaredLoss', 'load_csv', 'loss_function']

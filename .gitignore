@@ -15,3 +15,4 @@ benchmarks
 *.ipynb
 .ruff_cache
 dist
+private_docs
