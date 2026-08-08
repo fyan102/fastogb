@@ -16,9 +16,6 @@ methods and fitted attributes are described in the
 
 [estimator-interface]: https://github.com/fyan102/fastogb/blob/main/docs/general_rule_boosting_estimator.md
 
-Package maintainers can follow the [release guide][release-guide] for TestPyPI and production PyPI uploads.
-
-[release-guide]: https://github.com/fyan102/fastogb/blob/main/docs/releasing.md
 
 ```python
 from fastogb import (FullyCorrective, GeneralRuleBoostingEstimator, OrthogonalBoostingObjective,
