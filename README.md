@@ -1,15 +1,24 @@
-# faster-rule
+# fastogb
 
-`faster-rule` is the distribution name of the NumPy-first additive rule ensemble package imported as `fastogb`.
-It provides configurable query-selection objectives, search algorithms, losses and weight-update methods, with
-mandatory Numba CPU acceleration and optional CUDA acceleration for supported NVIDIA systems.
+`fastogb` is a NumPy-first package for constructing additive rule ensembles. It provides configurable
+query-selection objectives, search algorithms, losses and weight-update methods, with mandatory Numba CPU
+acceleration and optional CUDA acceleration for supported NVIDIA systems.
 
-Install the current checkout from the project root with `pip install -e .`. An editable installation immediately
-uses subsequent source changes, although a running Python or Jupyter process must be restarted after imports change.
+Install the current release from PyPI with:
+
+```bash
+pip install fastogb
+```
 
 The main public estimator is `GeneralRuleBoostingEstimator`. Its complete constructor, nested configuration,
 methods and fitted attributes are described in the
-[GeneralRuleBoostingEstimator interface](docs/general_rule_boosting_estimator.md).
+[GeneralRuleBoostingEstimator interface][estimator-interface].
+
+[estimator-interface]: https://github.com/fyan102/fastogb/blob/main/docs/general_rule_boosting_estimator.md
+
+Package maintainers can follow the [release guide][release-guide] for TestPyPI and production PyPI uploads.
+
+[release-guide]: https://github.com/fyan102/fastogb/blob/main/docs/releasing.md
 
 ```python
 from fastogb import (FullyCorrective, GeneralRuleBoostingEstimator, OrthogonalBoostingObjective,

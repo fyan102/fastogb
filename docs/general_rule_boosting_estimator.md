@@ -2,7 +2,7 @@
 
 `GeneralRuleBoostingEstimator` is the single user-facing estimator for constructing additive rule ensembles. Its
 behaviour is configured by composing a query-selection objective, a search method, a loss and a weight-update method.
-The distribution is named `faster-rule`, while Python code imports the package as `fastogb`.
+Install the `fastogb` distribution from PyPI with `pip install fastogb`, then import its public API from `fastogb`.
 
 ## Constructor
 

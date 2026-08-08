@@ -13,3 +13,5 @@ notebooks
 benchmarks
 .ipynb_checkpoints
 *.ipynb
+.ruff_cache
+dist
