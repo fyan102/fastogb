@@ -10,7 +10,8 @@ import numpy as np
 from fastogb.array_ops import extent_signature
 from fastogb.kernels import is_subset, mask_intersection_extent
 from fastogb.logic import Conjunction, KeyValueProposition
-from fastogb.searches.common import accepts_depth
+from fastogb.parallel import numba_threads, resolve_numba_jobs
+from fastogb.searches.common import accepts_depth, accepts_keyword
 
 
 class OrthogonalBeamSearch:
@@ -158,18 +159,29 @@ class OrthogonalBeamSearch:
 class GreedySearch:
     """Greedily add the proposition yielding the largest immediate improvement."""
 
-    def __init__(self, ctx, obj, bnd=None, verbose=False, forbidden_signatures=None, backend='auto', **kwargs):
+    def __init__(self, ctx, obj, bnd=None, verbose=False, forbidden_signatures=None, backend='auto', n_jobs=1,
+                 parallel_min_candidates=8, parallel_min_work=1_000_000, **kwargs):
         self.ctx = ctx
         self.f = obj
         self.verbose = verbose
         self.with_depth = accepts_depth(obj)
         self.forbidden_signatures = set(forbidden_signatures or ())
         self.backend = backend
+        self.n_jobs = resolve_numba_jobs(n_jobs)
+        self.parallel_min_candidates = int(parallel_min_candidates)
+        self.parallel_min_work = int(parallel_min_work)
+        self.parallel_values = hasattr(self.f, 'greedy_values') and accepts_keyword(self.f.greedy_values, 'parallel')
+        if self.parallel_min_candidates < 1 or self.parallel_min_work < 1:
+            raise ValueError('Parallel search thresholds must be positive')
 
     def _objective(self, extent, depth):
         return self.f(extent, depth) if self.with_depth else self.f(extent)
 
     def run(self):
+        with numba_threads(self.n_jobs):
+            return self._run()
+
+    def _run(self):
         intent = []
         extent = self.ctx.extension([])
         bit_extent = np.ones(self.ctx.m, dtype=bool)
@@ -201,7 +213,13 @@ class GreedySearch:
         if not len(indices):
             return None, None, None, -inf
         if hasattr(self.f, 'greedy_values'):
-            values = self.f.greedy_values(parent, self.ctx.bit_extents, indices, depth, self.backend)
+            enough_work = len(parent) * len(indices) >= self.parallel_min_work
+            parallel = (self.n_jobs > 1 and len(indices) >= self.parallel_min_candidates and enough_work
+                        and self.backend != 'cuda')
+            arguments = (parent, self.ctx.bit_extents, indices, depth, self.backend)
+            values = self.f.greedy_values(*arguments, parallel=parallel) if self.parallel_values else (
+                self.f.greedy_values(*arguments)
+            )
             position = int(np.argmax(values))
             index = int(indices[position])
             bit_extent = np.logical_and(parent, self.ctx.bit_extents[index])

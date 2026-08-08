@@ -61,7 +61,7 @@ if cuda is not None:
             sums[output_index] = total[0]
 
 
-def candidate_statistics(parent, attributes, indices, values, backend='auto'):
+def candidate_statistics(parent, attributes, indices, values, backend='auto', parallel=None):
     """Compute support and value sums for candidate intersections."""
     parent, attributes, indices, values = _normalise_inputs(parent, attributes, indices, values)
     if backend == 'cuda':
@@ -69,7 +69,8 @@ def candidate_statistics(parent, attributes, indices, values, backend='auto'):
     if backend not in {'auto', 'numba'}:
         raise ValueError(f'Unknown acceleration backend {backend!r}')
     work = len(parent) * len(indices)
-    kernel = _compiled_parallel_statistics if work >= 100_000 and len(indices) >= 8 else _compiled_statistics
+    use_parallel = work >= 100_000 and len(indices) >= 8 if parallel is None else bool(parallel)
+    kernel = _compiled_parallel_statistics if use_parallel else _compiled_statistics
     return kernel(parent, attributes, indices, values)
 
 

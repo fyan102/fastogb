@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "faster-rule"
 version = "0.1.0"
 description = "Additive rule ensembles with exact and approximate query search"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.0,<2.4; sys_platform == 'darwin' and platform_machine == 'x86_64'",

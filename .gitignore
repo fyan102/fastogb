@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+build/
+*.egg-info/
+papers
+.vscode
+realkd
+old_repo
+tests
+notebooks
+benchmarks
+.ipynb_checkpoints
+*.ipynb

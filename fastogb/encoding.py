@@ -190,8 +190,18 @@ class PropositionEncoder:
                 encoded[:, column] = np.asarray(values[:, column], dtype=np.float64)
                 continue
             mapping = self.category_maps_[int(column)]
-            for row, value in enumerate(values[:, column]):
-                encoded[row, column] = -1.0 if _is_missing(value) else float(mapping.get(value, -2))
+            raw = values[:, column]
+            if len(values) < 256 or len(mapping) > 32:
+                for row, value in enumerate(raw):
+                    encoded[row, column] = -1.0 if _is_missing(value) else float(mapping.get(value, -2))
+                continue
+            codes = np.full(len(values), -2.0)
+            for value, code in mapping.items():
+                codes[np.equal(raw, value)] = code
+            for row in np.flatnonzero(codes == -2):
+                if _is_missing(raw[row]):
+                    codes[row] = -1.0
+            encoded[:, column] = codes
         return encoded
 
 

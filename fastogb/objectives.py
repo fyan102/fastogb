@@ -9,8 +9,8 @@ import numpy as np
 from fastogb.accelerators import CudaCandidateStatistics, candidate_statistics
 from fastogb.array_ops import extent_signature
 from fastogb.encoding import PropositionEncoder, as_2d_array, infer_feature_names
-from fastogb.kernels import (absolute_prefix_bound, orthogonal_objective_batch, orthogonal_prefix_values,
-                                 prefix_objective_batch, squared_prefix_bound)
+from fastogb.kernels import (absolute_prefix_bound, orthogonal_greedy_values, orthogonal_objective_batch,
+                             orthogonal_prefix_values, prefix_objective_batch, squared_prefix_bound)
 from fastogb.linalg import orthogonal_binary_norm, project_away
 from fastogb.losses import SquaredLoss, loss_function
 from fastogb.search import Context, search_methods
@@ -104,9 +104,9 @@ class ObjectFunction:
         if self.context_matrix is not None:
             self.context_matrix = self.context_matrix[order]
 
-    def _candidate_sums(self, parent, attributes, indices, values, backend):
+    def _candidate_sums(self, parent, attributes, indices, values, backend, parallel=None):
         if backend != 'cuda':
-            return candidate_statistics(parent, attributes, indices, values, backend=backend)
+            return candidate_statistics(parent, attributes, indices, values, backend=backend, parallel=parallel)
         key = (id(attributes), id(values))
         if key not in self._cuda_statistics:
             self._cuda_statistics[key] = CudaCandidateStatistics(attributes, values)
@@ -162,9 +162,9 @@ class GradientBoostingObjectiveXGB(ObjectFunction):
         denominator = self._regularisation(len(query)) + self.h[extent].sum()
         return 0.0 if not len(extent) or denominator <= 0 else -self.g[extent].sum() / denominator
 
-    def greedy_values(self, parent, attributes, indices, depth, backend):
-        _, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend)
-        _, hessian_sums = self._candidate_sums(parent, attributes, indices, self.h, backend)
+    def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
+        _, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
+        _, hessian_sums = self._candidate_sums(parent, attributes, indices, self.h, backend, parallel)
         denominator = self._regularisation(depth) + hessian_sums
         return np.divide(np.square(gradient_sums), 2 * self.n * denominator,
                          out=np.full(len(indices), -inf), where=denominator > 0)
@@ -194,8 +194,8 @@ class GradientBoostingObjectiveMWG(ObjectFunction):
         gradient = self.g[extent]
         return float(max(np.abs(np.cumsum(gradient)).max(), np.abs(np.cumsum(gradient[::-1])).max()))
 
-    def greedy_values(self, parent, attributes, indices, depth, backend):
-        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend)
+    def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
+        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
         return np.where(supports > 0, np.abs(gradient_sums), -inf)
 
     def exact_batch(self, parent, attributes, indices, depth, parallel=False):
@@ -218,8 +218,8 @@ class GradientBoostingObjectiveGPE(ObjectFunction):
     def bound(self, extent):
         return absolute_prefix_bound(self.g, extent, self.reg, 2 * self.n)
 
-    def greedy_values(self, parent, attributes, indices, depth, backend):
-        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend)
+    def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
+        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
         denominator = 2 * self.n * np.sqrt(supports + self.reg)
         return np.divide(np.abs(gradient_sums), denominator, out=np.full(len(indices), -inf),
                          where=supports > 0)
@@ -271,6 +271,13 @@ class OrthogonalBoostingObjective(ObjectFunction):
         regularisation = self._regularisation(depth)
         return orthogonal_prefix_values(self.projected_gradient, self.orth_basis, order, self.epsilon,
                                         regularisation)
+
+    def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
+        if self.maximum_query_length is not None and depth > self.maximum_query_length:
+            return np.full(len(indices), -inf, dtype=np.float64)
+        regularisation = self._regularisation(depth)
+        return orthogonal_greedy_values(parent, attributes, indices, self.projected_gradient, self.orth_basis,
+                                        regularisation, self.epsilon, parallel)
 
     def exact_batch(self, parent, attributes, indices, depth, parallel=False):
         if self.maximum_query_length is not None and depth > self.maximum_query_length:

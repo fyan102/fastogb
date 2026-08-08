@@ -1,6 +1,5 @@
 """Exact branch-and-bound search over the core-query prefix tree."""
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from math import inf
@@ -9,6 +8,7 @@ import numpy as np
 
 from fastogb.kernels import (full_packed_extent, packed_extent_signature, packed_intersection_extent)
 from fastogb.logic import Conjunction
+from fastogb.parallel import numba_threads, resolve_numba_jobs
 from fastogb.searches.boundaries import Node, make_boundary
 from fastogb.searches.common import accepts_depth
 
@@ -19,7 +19,8 @@ class CoreQueryTreeSearch:
     traversal_orders = {'breadthfirst', 'bestboundfirst', 'bestvaluefirst', 'depthfirst'}
 
     def __init__(self, ctx, obj, bnd, order='bestboundfirst', apx=1.0, max_depth=10, verbose=False, n_jobs=1,
-                 parallel_min_candidates=8, forbidden_signatures=None, backend='auto', **kwargs):
+                 parallel_min_candidates=8, parallel_min_work=1_000_000, forbidden_signatures=None, backend='auto',
+                 **kwargs):
         if order not in self.traversal_orders:
             raise ValueError(f'Unknown traversal order {order!r}')
         if apx <= 0:
@@ -33,10 +34,11 @@ class CoreQueryTreeSearch:
         self.apx = apx
         self.max_depth = max_depth
         self.verbose = verbose
-        self.n_jobs = (os.cpu_count() or 1) if n_jobs == -1 else int(n_jobs)
-        if self.n_jobs < 1:
-            raise ValueError('n_jobs must be a positive integer or -1')
-        self.parallel_min_candidates = parallel_min_candidates
+        self.n_jobs = resolve_numba_jobs(n_jobs)
+        self.parallel_min_candidates = int(parallel_min_candidates)
+        self.parallel_min_work = int(parallel_min_work)
+        if self.parallel_min_candidates < 1 or self.parallel_min_work < 1:
+            raise ValueError('Parallel search thresholds must be positive')
         self.forbidden_signatures = set(forbidden_signatures or ())
         self.with_depth = accepts_depth(obj)
         self._reset_stats()
@@ -56,7 +58,8 @@ class CoreQueryTreeSearch:
     def traversal(self):
         use_executor = self.n_jobs > 1 and not hasattr(self.f, 'exact_batch')
         manager = ThreadPoolExecutor(max_workers=self.n_jobs) if use_executor else nullcontext(None)
-        with manager as executor:
+        thread_manager = numba_threads(self.n_jobs) if hasattr(self.f, 'exact_batch') else nullcontext()
+        with thread_manager, manager as executor:
             yield from self._traversal(executor)
 
     def _traversal(self, executor):
@@ -130,7 +133,8 @@ class CoreQueryTreeSearch:
         current = candidates[0][0]
         indices = np.asarray([candidate[1] for candidate in candidates], dtype=np.int64)
         depth = len(current.generator) + 1
-        parallel = self.n_jobs > 1 and len(candidates) >= self.parallel_min_candidates
+        enough_work = self.ctx.m * len(candidates) >= self.parallel_min_work
+        parallel = self.n_jobs > 1 and len(candidates) >= self.parallel_min_candidates and enough_work
         children, values, bounds = self.f.exact_batch(
             current.packed_extension, self.ctx.packed_extents, indices, depth, parallel
         )

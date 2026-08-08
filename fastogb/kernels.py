@@ -257,14 +257,43 @@ def _orthogonal_objective_batch(parent, attributes, indices, gradient, basis, re
         residual = count - projection_squared
         tolerance = sqrt(32.0 * np.finfo(np.float64).eps) * max(count, projection_squared, 1.0)
         if residual < -tolerance:
-            raise FloatingPointError('Orthogonal projection exceeds query norm')
-        norm = sqrt(max(residual, 0.0) + regularisation)
-        if count and (regularisation > 0 or norm > epsilon):
-            values[output] = abs(gradient_sum) / (norm + epsilon)
-        if count:
-            lower_denominator = sqrt(regularisation) + epsilon
-            bounds[output] = min(absolute_gradient_sum / lower_denominator, gradient_norm)
+            values[output] = np.nan
+            bounds[output] = np.nan
+        else:
+            norm = sqrt(max(residual, 0.0) + regularisation)
+            if count and (regularisation > 0 or norm > epsilon):
+                values[output] = abs(gradient_sum) / (norm + epsilon)
+            if count:
+                lower_denominator = sqrt(regularisation) + epsilon
+                bounds[output] = min(absolute_gradient_sum / lower_denominator, gradient_norm)
     return children, values, bounds
+
+
+def _orthogonal_greedy_values(parent, attributes, indices, gradient, basis, regularisation, epsilon):
+    values = np.full(len(indices), -inf, dtype=np.float64)
+    for output in prange(len(indices)):
+        attribute = indices[output]
+        projection = np.zeros(basis.shape[1], dtype=np.float64)
+        gradient_sum = 0.0
+        count = 0
+        for row in range(len(parent)):
+            if parent[row] and attributes[attribute, row]:
+                count += 1
+                gradient_sum += gradient[row]
+                for column in range(basis.shape[1]):
+                    projection[column] += basis[row, column]
+        projection_squared = 0.0
+        for column in range(len(projection)):
+            projection_squared += projection[column] * projection[column]
+        residual = count - projection_squared
+        tolerance = sqrt(32.0 * np.finfo(np.float64).eps) * max(count, projection_squared, 1.0)
+        if residual < -tolerance:
+            values[output] = np.nan
+        else:
+            norm = sqrt(max(residual, 0.0) + regularisation)
+            if count and (regularisation > 0 or norm > epsilon):
+                values[output] = abs(gradient_sum) / (norm + epsilon)
+    return values
 
 
 def _find_small_packed_critical_index(gen_index, extension, closure, attributes):
@@ -376,6 +405,8 @@ _compiled_prefix_objective_batch = _compile(_prefix_objective_batch)
 _compiled_parallel_prefix_objective_batch = _compile(_prefix_objective_batch, parallel=True)
 _compiled_orthogonal_objective_batch = _compile(_orthogonal_objective_batch)
 _compiled_parallel_orthogonal_objective_batch = _compile(_orthogonal_objective_batch, parallel=True)
+_compiled_orthogonal_greedy_values = _compile(_orthogonal_greedy_values)
+_compiled_parallel_orthogonal_greedy_values = _compile(_orthogonal_greedy_values, parallel=True)
 _compiled_find_small_packed_critical_index = _compile(_find_small_packed_critical_index)
 _compiled_complete_packed_closure = _compile(_complete_packed_closure)
 _compiled_proposition_matrix = _compile(_proposition_matrix)
@@ -492,8 +523,25 @@ def orthogonal_objective_batch(parent, attributes, indices, gradient, basis, reg
     gradient = np.ascontiguousarray(gradient, dtype=np.float64)
     basis = np.ascontiguousarray(basis, dtype=np.float64)
     kernel = _compiled_parallel_orthogonal_objective_batch if parallel else _compiled_orthogonal_objective_batch
-    return kernel(parent, attributes, indices, gradient, basis, float(regularisation), float(epsilon),
-                  float(gradient_norm))
+    result = kernel(parent, attributes, indices, gradient, basis, float(regularisation), float(epsilon),
+                    float(gradient_norm))
+    if np.any(np.isnan(result[1])):
+        raise FloatingPointError('Orthogonal projection exceeds query norm')
+    return result
+
+
+def orthogonal_greedy_values(parent, attributes, indices, gradient, basis, regularisation, epsilon, parallel=False):
+    """Evaluate all greedy OGB refinements in one compiled candidate loop."""
+    parent = np.ascontiguousarray(parent, dtype=np.bool_)
+    attributes = np.ascontiguousarray(attributes, dtype=np.bool_)
+    indices = np.ascontiguousarray(indices, dtype=np.int64)
+    gradient = np.ascontiguousarray(gradient, dtype=np.float64)
+    basis = np.ascontiguousarray(basis, dtype=np.float64)
+    kernel = _compiled_parallel_orthogonal_greedy_values if parallel else _compiled_orthogonal_greedy_values
+    values = kernel(parent, attributes, indices, gradient, basis, float(regularisation), float(epsilon))
+    if np.any(np.isnan(values)):
+        raise FloatingPointError('Orthogonal projection exceeds query norm')
+    return values
 
 
 def proposition_matrix(values, columns, operations, operands, parallel=None):
