@@ -8,8 +8,8 @@ Install the `fastogb` distribution from PyPI with `pip install fastogb`, then im
 
 ```python
 GeneralRuleBoostingEstimator(
-    num_rules=3, objective_function=GradientBoostingObjectiveXGB, weight_update_method=None,
-    loss='squared', reg=1.0, search='exhaustive', include_default_rule=False,
+    num_rules=3, objective_function=OrthogonalBoostingObjective, weight_update_method=FullyCorrective,
+    loss='squared', reg=1.0, search='greedy', include_default_rule=False,
     include_linear_terms=False, max_col_attr=10, search_params=None, verbose=False, basis_rtol=None,
     objective_params=None, max_components=10_000, n_jobs=1)
 ```
@@ -21,7 +21,7 @@ rule and optional linear terms are base terms and do not count towards this numb
 rules when no admissible independent query remains or when `max_components` is reached. The realised number of
 rules can be inspected through `rules_`, `_base_rule_count_` and `stopping_reason_` after fitting.
 
-### `objective_function=GradientBoostingObjectiveXGB`
+### `objective_function=OrthogonalBoostingObjective`
 
 `objective_function` is an objective class used to score candidate queries during search. Pass the class itself,
 rather than an already constructed instance, because a fresh objective is built at every boosting iteration from the
@@ -37,7 +37,7 @@ implement `__call__(extent)` and `bound(extent)` for exact search. Depth-aware o
 argument. Optimised greedy search can additionally provide `greedy_values`, and orthogonal beam search requires
 `prefix_values`.
 
-### `weight_update_method=None`
+### `weight_update_method=FullyCorrective`
 
 `weight_update_method` accepts an instance of `KeepWeight`, `LineSearch`, `FullyCorrective` or a compatible custom
 `WeightUpdateMethod`. `None` selects `KeepWeight()`. The estimator copies the updater for fitting and overwrites the
@@ -67,7 +67,7 @@ MWG query objective ignores `reg`, although its weight update still uses it. The
 unregularised unless `objective_params={'length_regularisation': True}` is supplied; its weight update still uses
 the estimator's `reg` value.
 
-### `search='exhaustive'`
+### `search='greedy'`
 
 `search` selects the algorithm that maximises the query objective. Accepted strings are `'exhaustive'`, `'greedy'`
 and `'ogb'`. A compatible custom search class may also be supplied.
