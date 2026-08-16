@@ -1,22 +1,5 @@
 # fastogb
 
-## Citation
-
-If you use `fastogb` or its implementation of orthogonal gradient boosting in academic work, please cite:
-
-```bibtex
-@inproceedings{yang2024orthogonal,
-  title={Orthogonal gradient boosting for simpler additive rule ensembles},
-  author={Yang, Fan and Le Bodic, Pierre and Kamp, Michael and Boley, Mario},
-  booktitle={International Conference on Artificial Intelligence and Statistics},
-  pages={1117--1125},
-  year={2024},
-  organization={PMLR}
-}
-```
-
-The citation is also available in [the citation documentation](docs/citation.md) and `CITATION.cff`.
-
 `fastogb` is a NumPy-first package for constructing additive rule ensembles. It provides configurable
 query-selection objectives, search algorithms, losses and weight-update methods, with mandatory Numba CPU
 acceleration and optional CUDA acceleration for supported NVIDIA systems.
@@ -51,3 +34,21 @@ print(model.rules_)
 predictions = model.predict(data)
 probabilities = model.predict_proba(data)
 ```
+
+
+## Citation
+
+If you use `fastogb` or its implementation of orthogonal gradient boosting in academic work, please cite:
+
+```bibtex
+@inproceedings{yang2024orthogonal,
+  title={Orthogonal gradient boosting for simpler additive rule ensembles},
+  author={Yang, Fan and Le Bodic, Pierre and Kamp, Michael and Boley, Mario},
+  booktitle={International Conference on Artificial Intelligence and Statistics},
+  pages={1117--1125},
+  year={2024},
+  organization={PMLR}
+}
+```
+
+The citation is also available in [the citation documentation](docs/citation.md) and `CITATION.cff`.

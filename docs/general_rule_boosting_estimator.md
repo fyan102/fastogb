@@ -1,23 +1,5 @@
 # GeneralRuleBoostingEstimator interface
 
-## Citation
-
-Research using this estimator or its orthogonal gradient boosting implementation should cite:
-
-```bibtex
-@inproceedings{yang2024orthogonal,
-  title={Orthogonal gradient boosting for simpler additive rule ensembles},
-  author={Yang, Fan and Le Bodic, Pierre and Kamp, Michael and Boley, Mario},
-  booktitle={International Conference on Artificial Intelligence and Statistics},
-  pages={1117--1125},
-  year={2024},
-  organization={PMLR}
-}
-```
-
-See [the citation documentation](citation.md) and the repository-level `CITATION.cff` for the same preferred
-citation in human-readable and machine-readable forms.
-
 `GeneralRuleBoostingEstimator` is the single user-facing estimator for constructing additive rule ensembles. Its
 behaviour is configured by composing a query-selection objective, a search method, a loss and a weight-update method.
 Install the `fastogb` distribution from PyPI with `pip install fastogb`, then import its public API from `fastogb`.
@@ -384,3 +366,23 @@ for iteration, (ensemble, loss, elapsed) in enumerate(
 Rule strings use the feature names supplied during fitting. Numeric propositions are rendered as comparisons such as
 `age<=42.0`, categorical propositions as equalities such as `colour==blue`, and conjunctions join propositions with
 `&`. The displayed coefficient is the rule's current fitted contribution when the conjunction is satisfied.
+
+
+
+## Citation
+
+Research using this estimator or its orthogonal gradient boosting implementation should cite:
+
+```bibtex
+@inproceedings{yang2024orthogonal,
+  title={Orthogonal gradient boosting for simpler additive rule ensembles},
+  author={Yang, Fan and Le Bodic, Pierre and Kamp, Michael and Boley, Mario},
+  booktitle={International Conference on Artificial Intelligence and Statistics},
+  pages={1117--1125},
+  year={2024},
+  organization={PMLR}
+}
+```
+
+See [the citation documentation](citation.md) and the repository-level `CITATION.cff` for the same preferred
+citation in human-readable and machine-readable forms.
