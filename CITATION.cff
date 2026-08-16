@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the following paper."
+title: "fastogb"
+type: software
+authors:
+  - family-names: "Yang"
+    given-names: "Fan"
+preferred-citation:
+  type: conference-paper
+  title: "Orthogonal gradient boosting for simpler additive rule ensembles"
+  authors:
+    - family-names: "Yang"
+      given-names: "Fan"
+    - family-names: "Le Bodic"
+      given-names: "Pierre"
+    - family-names: "Kamp"
+      given-names: "Michael"
+    - family-names: "Boley"
+      given-names: "Mario"
+  collection-title: "International Conference on Artificial Intelligence and Statistics"
+  start: 1117
+  end: 1125
+  year: 2024
+  publisher:
+    name: "PMLR"
