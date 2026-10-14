@@ -55,16 +55,17 @@ class AdditiveRuleEnsemble:
 
     def __call__(self, data):
         """Return additive scores for one observation or a two-dimensional feature matrix."""
-        return evaluate_rule_ensemble(data, self.members, self._get_evaluation_plan(), self.n_jobs)
+        plan = self.get_evaluation_plan()
+        return evaluate_rule_ensemble(data, self.members, plan, self.n_jobs)
 
     def query_matrix(self, data, n_jobs=None):
         """Return one evaluated query column per rule."""
         jobs = self.n_jobs if n_jobs is None else n_jobs
-        return evaluate_rule_queries(data, self.members, self._get_evaluation_plan(), jobs)
+        return evaluate_rule_queries(data, self.members, self.get_evaluation_plan(), jobs)
 
     def supports_compiled(self, data):
         """Return whether package-native queries can evaluate the supplied data through Numba."""
-        if self._get_evaluation_plan() is None:
+        if self.get_evaluation_plan() is None:
             return False
         values = data.to_numpy(copy=False) if hasattr(data, 'to_numpy') else np.asarray(data)
         if values.ndim not in {1, 2}:
@@ -77,7 +78,7 @@ class AdditiveRuleEnsemble:
 
     def append(self, rule):
         self.members.append(rule)
-        self._invalidate_evaluation_plan()
+        self.invalidate_evaluation_plan()
         return self
 
     def size(self):
@@ -95,20 +96,23 @@ class AdditiveRuleEnsemble:
         members = list(grouped.values())
         if inplace:
             self.members = members
-            self._invalidate_evaluation_plan()
+            self.invalidate_evaluation_plan()
             return self
         return AdditiveRuleEnsemble(members, self.n_jobs)
 
     def copy(self):
-        return AdditiveRuleEnsemble([Rule(rule.q, rule.y, rule.z) for rule in self.members], self.n_jobs)
+        ensemble = AdditiveRuleEnsemble([Rule(rule.q, rule.y, rule.z) for rule in self.members], self.n_jobs)
+        if hasattr(self, '_base_rule_count_'):
+            ensemble._base_rule_count_ = self._base_rule_count_
+        return ensemble
 
-    def _get_evaluation_plan(self):
+    def get_evaluation_plan(self):
         signature = rule_structure_signature(self.members)
         if signature != self._evaluation_signature:
             self._evaluation_plan = build_rule_evaluation_plan(self.members)
             self._evaluation_signature = signature
         return self._evaluation_plan
 
-    def _invalidate_evaluation_plan(self):
+    def invalidate_evaluation_plan(self):
         self._evaluation_plan = None
         self._evaluation_signature = None

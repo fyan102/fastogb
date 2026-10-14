@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from copy import copy
+from copy import copy, deepcopy
 from inspect import signature
 from time import perf_counter
 
@@ -16,6 +16,7 @@ from fastogb.logic import Conjunction
 from fastogb.losses import loss_function
 from fastogb.objectives import GradientBoostingObjectiveXGB
 from fastogb.parallel import numba_threads, resolve_numba_jobs
+from fastogb.replacement import no_replacement
 from fastogb.rules import AdditiveRuleEnsemble, Rule
 from fastogb.terms import LinearTerm, make_linear_terms
 from fastogb.weights import KeepWeight, WeightUpdateMethod, initial_constant
@@ -158,8 +159,8 @@ class GeneralRuleBoostingEstimator:
         self.reg = reg
         return self
 
-    def fit(self, data, target, has_origin_rules=False, verbose=False):
-        """Fit an additive rule ensemble.
+    def fit(self, data, target, has_origin_rules=None, verbose=False, *, replacement_selector=no_replacement):
+        """Initialise, grow or adapt the ensemble according to its current learned-rule count.
 
         Parameters
         ----------
@@ -170,12 +171,15 @@ class GeneralRuleBoostingEstimator:
         target : array-like of shape (n_samples,) or (n_samples, 1)
             Finite numeric response values convertible to ``float64``. Squared loss accepts real values,
             logistic loss requires labels encoded exactly as -1 and 1, and Poisson loss requires values >= 0.
-        has_origin_rules : bool, default=False
-            If false, discard the previous ensemble and fit from the configured base terms. If true, retain the
-            existing ensemble and continue until its learned-rule count reaches ``num_rules``.
+        has_origin_rules : bool or None, default=None
+            None detects existing rules automatically. Explicit False requests fresh fitting; explicit True
+            preserves legacy continuation, which only grows the ensemble towards ``num_rules``.
         verbose : bool, default=False
             Print the selected rule and empirical mean loss after each completed iteration. Output is enabled
             when this value or the constructor's ``verbose`` value is true.
+        replacement_selector : callable, keyword-only, default=no_replacement
+            Function accepting an ensemble snapshot and returning a list of zero-based indices to replace.
+            Called only when automatic fitting finds enough rules. The default selects none and updates weights.
 
         Returns
         -------
@@ -196,90 +200,281 @@ class GeneralRuleBoostingEstimator:
         Feature names and categorical columns are configured through ``search_params``. Prediction inputs must
         preserve the fitted column order and compatible column value types.
         """
+        if has_origin_rules is not None:
+            if not isinstance(has_origin_rules, (bool, np.bool_)):
+                raise TypeError('has_origin_rules must be a Boolean or None')
+            if replacement_selector is not no_replacement:
+                raise ValueError('Use automatic fitting to supply a replacement_selector')
+            if not has_origin_rules or not len(self.rules_):
+                return self.fit_initial_rules(data, target, verbose)
+            return self.fit_initial_rules(data, target, verbose, operation='continue')
+        if not callable(replacement_selector):
+            raise TypeError('replacement_selector must be callable')
+        if not len(self.rules_):
+            return self.fit_initial_rules(data, target, verbose)
+        base_count = sum(isinstance(rule.q, LinearTerm) for rule in self.rules_)
+        first = self.rules_[0].q
+        base_count += int(self.include_default_rule and isinstance(first, Conjunction) and not len(first))
+        if len(self.rules_) - base_count < self.num_rules:
+            return self.fit_initial_rules(data, target, verbose, operation='grow')
+        return self.replace_rules(data, target, replacement_selector, verbose)
+
+    def update_weights(self, data, target, verbose=False):
+        """Keep all queries and adapt their coefficients using the configured weight updater.
+
+        Parameters
+        ----------
+        data : array-like of shape (n_samples, n_features_in_)
+            New observations preserving the existing positional feature schema.
+        target : array-like of shape (n_samples,) or (n_samples, 1)
+            Finite responses accepted by the configured loss.
+        verbose : bool, default=False
+            Print the updated empirical mean loss.
+
+        Returns
+        -------
+        self : GeneralRuleBoostingEstimator
+            Updated estimator. The updater controls its learning rate and fixed coefficient prefix.
+        """
+        if not hasattr(self, 'encoder_') and not len(self.rules_):
+            raise RuntimeError('Fit an initial ensemble before updating weights')
+        return self.fit_initial_rules(data, target, verbose, operation='weights')
+
+    def replace_rules(self, data, target, replacement_selector=no_replacement, verbose=False):
+        """Replace selected learned conjunctions; an empty selection requests coefficient-only adaptation.
+
+        Parameters
+        ----------
+        data : array-like of shape (n_samples, n_features_in_)
+            New observations preserving the existing positional feature schema.
+        target : array-like of shape (n_samples,) or (n_samples, 1)
+            Finite responses accepted by the configured loss.
+        replacement_selector : callable, default=no_replacement
+            Read-only function of an ensemble snapshot returning unique non-negative integer indices. Base terms
+            cannot be selected. Any loss-based selection or preliminary coefficient calculation belongs to it.
+        verbose : bool, default=False
+            Enable iteration output while regrowing the ensemble.
+
+        Returns
+        -------
+        self : GeneralRuleBoostingEstimator
+            Estimator with the selected rules replaced and prediction caches rebuilt.
+
+        Raises
+        ------
+        ValueError
+            If indices are duplicated, out of range or refer to protected base terms.
+        RuntimeError
+            If search cannot restore the requested rule count. The pre-replacement state is restored.
+        """
+        if not callable(replacement_selector):
+            raise TypeError('replacement_selector must be callable')
+        if not len(self.rules_):
+            raise RuntimeError('Fit an initial ensemble before replacing rules')
+        if replacement_selector is no_replacement:
+            return self.update_weights(data, target, verbose)
+        base_count = sum(isinstance(rule.q, LinearTerm) for rule in self.rules_)
+        first = self.rules_[0].q
+        default_count = int(self.include_default_rule and isinstance(first, Conjunction) and not len(first))
+        base_count += default_count
+        snapshot = deepcopy(self.rules_)
+        snapshot._base_rule_count_ = base_count
+        indices = replacement_selector(snapshot)
+        if not isinstance(indices, list):
+            raise TypeError('replacement_selector must return a list of integer indices; use [] to keep all rules')
+        if any(isinstance(index, (bool, np.bool_)) or not isinstance(index, (int, np.integer)) for index in indices):
+            raise TypeError('Replacement indices must be integers')
+        if len(set(indices)) != len(indices) or any(index < 0 or index >= len(self.rules_) for index in indices):
+            raise ValueError('Replacement indices must be unique and within the ensemble')
+        if any(index < default_count or isinstance(self.rules_[index].q, LinearTerm) for index in indices):
+            raise ValueError('Default and linear terms cannot be replaced')
+        if not indices:
+            return self.update_weights(data, target, verbose)
+        state = self.__dict__.copy()
+        original = self.rules_
+        selected = set(indices)
+        desired = max(self.num_rules, len(original) - base_count)
+        started = perf_counter()
+        values = as_2d_array(data)
+        response = np.asarray(target, dtype=np.float64).reshape(-1)
+        if len(values) != len(response) or not len(response) or not np.all(np.isfinite(response)):
+            raise ValueError('Features and finite targets must have matching non-zero sample counts')
+        loss_before = float(np.mean(loss_function(self.loss)(response, original(values))))
+        self.rules_ = AdditiveRuleEnsemble([Rule(rule.q, rule.y, rule.z) for i, rule in enumerate(original) if i not in selected],
+                                         n_jobs=original.n_jobs)
+        try:
+            self.fit_initial_rules(data, target, verbose, operation='replace', target_rules=desired)
+            if len(self.rules_) - self._base_rule_count_ < desired:
+                raise RuntimeError(f'Replacement could not restore {desired} learned rules: {self.stopping_reason_}')
+            self.last_update_.update(removed_indices=list(indices), removed_rules=[str(original[i].q) for i in indices],
+                                     previous_weights=np.asarray([rule.y for rule in original]), loss_before=loss_before,
+                                     elapsed=perf_counter() - started)
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(state)
+            raise
+        return self
+
+    def fit_initial_rules(self, data, target, verbose=False, *, operation='initial', target_rules=None):
+        """Fit a fresh ensemble or execute the shared training loop for an adaptation operation.
+
+        Parameters
+        ----------
+        data : array-like of shape (n_samples, n_features)
+            Numeric, categorical or mixed feature matrix accepted by ``fit``. Initial fitting may change its schema;
+            adaptation preserves the fitted feature names, column order and numeric or categorical column roles.
+        target : array-like of shape (n_samples,) or (n_samples, 1)
+            Finite response values in the domain of the configured loss.
+        verbose : bool, default=False
+            Enable the same iteration output as ``fit``.
+        operation : {'initial', 'grow', 'continue', 'weights', 'replace'}, keyword-only, default='initial'
+            Initial fitting resets the ensemble and ignores learning-rate damping. The other modes share preparation
+            and the boosting loop with ``fit``, ``update_weights`` and ``replace_rules``. Use those methods for automatic
+            dispatch, coefficient-only adaptation and validated replacement selection respectively.
+        target_rules : int or None, keyword-only, default=None
+            Non-negative learned-rule count for this operation. None uses ``num_rules``. Replacement supplies the count
+            needed to restore the ensemble after removing its selected rules.
+
+        Returns
+        -------
+        self : GeneralRuleBoostingEstimator
+            Fitted estimator. Initial fitting resets iteration and adaptation histories.
+        """
+        if operation not in {'initial', 'grow', 'continue', 'weights', 'replace'}:
+            raise ValueError(f'Unknown fitting operation: {operation}')
+        if target_rules is not None:
+            if isinstance(target_rules, (bool, np.bool_)) or not isinstance(target_rules, (int, np.integer)) or target_rules < 0:
+                raise ValueError('target_rules must be a non-negative integer or None')
         values = as_2d_array(data)
         target = np.asarray(target, dtype=np.float64).reshape(-1)
         if len(values) != len(target):
             raise ValueError('Feature and target arrays must contain the same number of samples')
+        if not len(target):
+            raise ValueError('Training data must contain at least one observation')
         if not np.all(np.isfinite(target)):
             raise ValueError('Target contains NaN or infinite values')
-        continuing = has_origin_rules and hasattr(self, 'encoder_')
-        params = _default_search_params(self.search_params, self.max_col_attr)
-        self.search_params_ = params.copy()
-        self.n_jobs_ = resolve_numba_jobs(params.get('n_jobs', self.n_jobs))
-        self.rules_.n_jobs = self.n_jobs_
+        continuing = operation != 'initial'
+        if continuing and hasattr(self, 'n_features_in_') and values.shape[1] != self.n_features_in_:
+            raise ValueError(f'Expected {self.n_features_in_} columns, received {values.shape[1]}')
+        params = {'order': 'bestboundfirst', 'apx': 1.0, 'max_depth': None, 'max_col_attr': self.max_col_attr}
+        if self.search_params is not None:
+            params.update(self.search_params)
+        jobs = resolve_numba_jobs(params.get('n_jobs', self.n_jobs))
         runtime_params = params.copy()
-        runtime_params.setdefault('n_jobs', self.n_jobs_)
-        feature_names = infer_feature_names(data, values.shape[1], params.get('feature_names'))
+        runtime_params.setdefault('n_jobs', jobs)
+        requested_names = params.get('feature_names')
+        if continuing and requested_names is None and not hasattr(data, 'columns'):
+            requested_names = getattr(self, 'feature_names_in_', None)
+        feature_names = infer_feature_names(data, values.shape[1], requested_names)
+        if continuing and hasattr(self, 'feature_names_in_') and tuple(feature_names) != tuple(self.feature_names_in_):
+            raise ValueError('Adaptation must preserve the fitted feature names and column order')
         encoder_kwargs = {key: params[key] for key in _ENCODER_KEYS if key in params and key != 'without'}
-        encoder = PropositionEncoder(max_col_attr=params.get('max_col_attr', self.max_col_attr),
-                                     feature_names=feature_names, **encoder_kwargs)
-        context_matrix = encoder.fit_transform(values, without=params.get('without'))
-        self.encoder_ = encoder
-        self.n_features_in_ = values.shape[1]
-        self.feature_names_in_ = np.asarray(feature_names)
-        self.context_matrix_ = context_matrix
+        if continuing and hasattr(self, 'encoder_') and 'categorical' not in encoder_kwargs:
+            encoder_kwargs['categorical'] = tuple(self.encoder_.categorical_indices_)
+        if operation == 'weights' and hasattr(self, 'encoder_'):
+            encoder = self.encoder_
+            context_matrix = encoder.transform(values)
+        else:
+            encoder = PropositionEncoder(max_col_attr=params.get('max_col_attr', self.max_col_attr),
+                                         feature_names=feature_names, **encoder_kwargs)
+            context_matrix = encoder.fit_transform(values, without=params.get('without'))
+        if continuing and hasattr(self, 'encoder_') and encoder.categorical_indices_ != self.encoder_.categorical_indices_:
+            raise ValueError('Adaptation must preserve numeric and categorical column roles')
+        model = copy(self)
+        model.search_params_ = params.copy()
+        model.n_jobs_ = jobs
+        model.encoder_ = encoder
+        model.n_features_in_ = values.shape[1]
+        model.feature_names_in_ = np.asarray(feature_names)
+        model.context_matrix_ = context_matrix
+        model.rules_ = self.rules_.copy() if continuing else AdditiveRuleEnsemble(n_jobs=jobs)
+        model.rules_.n_jobs = jobs
+        model.history = []
+        model.history_ = model.history
+        model.time = []
+        model.time_ = model.time
+        model.loss_history_ = []
+        model.stopping_reason_ = None
         if not continuing:
-            self.rules_ = AdditiveRuleEnsemble(n_jobs=self.n_jobs_)
-        self.history = []
-        self.history_ = self.history
-        self.time = []
-        self.time_ = self.time
-        self.loss_history_ = []
-        self.stopping_reason_ = None
-        if not continuing:
-            self._prepare_base_terms(values, target, encoder)
-        self._base_rule_count_ = getattr(self, '_base_rule_count_', 0)
-        self._default_rule_count_ = getattr(self, '_default_rule_count_', 0)
-        self._initialise_training_cache(values)
-        self._basis_ = self._initial_basis(values)
+            model.prepare_base_terms(values, target, encoder)
+            model.update_history_ = []
+        else:
+            first = model.rules_[0].q if len(model.rules_) else None
+            model._default_rule_count_ = int(model.include_default_rule and isinstance(first, Conjunction) and not len(first))
+            model._base_rule_count_ = model._default_rule_count_ + sum(isinstance(rule.q, LinearTerm) for rule in model.rules_)
+        model.rules_._base_rule_count_ = model._base_rule_count_
+        model.initialise_training_cache(values)
+        model._basis_ = model.initial_basis(values)
         updater = copy(self.weight_update_method) if self.weight_update_method is not None else KeepWeight()
         updater.loss = self.loss
         updater.reg = float(self.reg)
-        self.weight_update_method_ = updater
-        if hasattr(updater, 'fixed_prefix'):
-            updater.fixed_prefix = self._default_rule_count_
-        self._initialise_base_weights(updater, values, target)
+        model.weight_update_method_ = updater
+        if hasattr(updater, 'fixed_prefix') and updater.fixed_prefix is None:
+            updater.fixed_prefix = model._default_rule_count_
+        if not continuing and hasattr(updater, 'learning_rate'):
+            updater.learning_rate = 1.0
+        previous_weights = np.asarray([rule.y for rule in model.rules_], dtype=np.float64)
+        loss_before = float(np.mean(loss_function(self.loss)(target, model._training_scores_)))
+        if not continuing or operation == 'continue':
+            model.initialise_base_weights(updater, values, target)
         component_count = 0
-        while len(self.rules_) - self._base_rule_count_ < self.num_rules and component_count < self.max_components:
-            started = perf_counter()
-            query, objective, mask, reason = self._find_independent_query(values, target, context_matrix, encoder,
-                                                                          runtime_params, verbose)
-            if query is None:
-                self.stopping_reason_ = reason
+        desired = self.num_rules if target_rules is None else target_rules
+        while operation == 'weights' or len(model.rules_) - model._base_rule_count_ < desired:
+            if operation != 'weights' and component_count >= self.max_components:
                 break
-            weight = objective.opt_weight(query) if hasattr(objective, 'opt_weight') else 1.0
-            if not np.isfinite(weight):
-                raise FloatingPointError('Initial rule weight is NaN or infinite')
-            self.rules_.append(Rule(query, weight))
-            self._append_training_mask(mask)
-            weights = self._calculate_weights(updater, values, target)
-            if len(weights) != len(self.rules_) or not np.all(np.isfinite(weights)):
+            started = perf_counter()
+            if operation != 'weights':
+                query, objective, mask, reason = model.find_independent_query(values, target, context_matrix, encoder,
+                                                                            runtime_params, verbose)
+                if query is None:
+                    model.stopping_reason_ = reason
+                    break
+                weight = objective.opt_weight(query) if hasattr(objective, 'opt_weight') else 1.0
+                if not np.isfinite(weight):
+                    raise FloatingPointError('Initial rule weight is NaN or infinite')
+                model.rules_.append(Rule(query, weight))
+                mask = np.asarray(mask, dtype=np.float64).reshape(-1, 1)
+                model.training_rule_matrix_ = np.ascontiguousarray(np.column_stack((model.training_rule_matrix_, mask)))
+                component_count += 1 + len(query)
+            weights = model.calculate_weights(updater, values, target, new_rule=continuing and operation != 'weights')
+            if len(weights) != len(model.rules_) or not np.all(np.isfinite(weights)):
                 raise FloatingPointError('Weight update returned invalid coefficients')
-            for rule, updated_weight in zip(self.rules_, weights):
+            for rule, updated_weight in zip(model.rules_, weights):
                 rule.y = float(updated_weight)
-            self._training_scores_ = self.training_rule_matrix_ @ weights
-            component_count += 1 + len(query)
-            self.history.append(self.rules_.copy())
-            self.loss_history_.append(float(np.mean(loss_function(self.loss)(target, self._training_scores_))))
-            self.time.append(perf_counter() - started)
+            model._training_scores_ = model.training_rule_matrix_ @ weights
+            model.history.append(model.rules_.copy())
+            model.loss_history_.append(float(np.mean(loss_function(self.loss)(target, model._training_scores_))))
+            model.time.append(perf_counter() - started)
             if self.verbose or verbose:
-                print(f'Rule: {self.rules_[-1]}')
-                print(f'Loss: {self.loss_history_[-1]:.8g}')
-        if self.stopping_reason_ is None:
-            reached_target = len(self.rules_) - self._base_rule_count_ >= self.num_rules
-            self.stopping_reason_ = 'maximum_rules' if reached_target else 'component_limit'
-        self.orth_basis_ = self._basis_.values
-        self._build_prediction_plan()
+                if operation != 'weights':
+                    print(f'Rule: {model.rules_[-1]}')
+                print(f'Loss: {model.loss_history_[-1]:.8g}')
+            if operation == 'weights':
+                break
+        if model.stopping_reason_ is None:
+            reached_target = len(model.rules_) - model._base_rule_count_ >= desired
+            model.stopping_reason_ = 'maximum_rules' if reached_target else 'component_limit'
+            if operation == 'weights':
+                model.stopping_reason_ = 'weights_updated'
+        model.orth_basis_ = model._basis_.values
+        model.build_prediction_plan()
+        model.last_update_ = {'operation': operation, 'previous_weights': previous_weights,
+                              'weights': np.asarray([rule.y for rule in model.rules_]), 'loss_before': loss_before,
+                              'loss_after': float(np.mean(loss_function(self.loss)(target, model._training_scores_))),
+                              'removed_indices': [], 'elapsed': float(sum(model.time)), 'stopping_reason': model.stopping_reason_}
+        if continuing:
+            model.update_history_ = list(getattr(self, 'update_history_', [])) + [model.last_update_]
+        self.__dict__.update(model.__dict__)
         return self
 
-    def _initial_basis(self, data):
+    def initial_basis(self, data):
         basis = OrthogonalBasis(len(data), rtol=self.basis_rtol)
         active = list(range(self._default_rule_count_, len(self.rules_)))
         if active:
             basis.rebuild(self.training_rule_matrix_[:, active])
         return basis
 
-    def _prepare_base_terms(self, data, target, encoder):
+    def prepare_base_terms(self, data, target, encoder):
         self._default_rule_count_ = int(bool(self.include_default_rule))
         if self.include_default_rule:
             self.rules_.append(Rule(Conjunction(), initial_constant(self.loss, target)))
@@ -288,7 +483,7 @@ class GeneralRuleBoostingEstimator:
                 self.rules_.append(Rule(term, 0.0))
         self._base_rule_count_ = len(self.rules_)
 
-    def _initialise_base_weights(self, updater, data, target):
+    def initialise_base_weights(self, updater, data, target):
         linear_indices = [index for index, rule in enumerate(self.rules_) if isinstance(rule.q, LinearTerm)]
         if not linear_indices:
             return
@@ -297,25 +492,29 @@ class GeneralRuleBoostingEstimator:
         scores = self.training_rule_matrix_ @ weights
         for index in linear_indices:
             column = self.training_rule_matrix_[:, index]
-            gradient, hessian = loss.derivatives(target, scores) if hasattr(loss, 'derivatives') else (
-                loss.g(target, scores), loss.h(target, scores)
-            )
+            if hasattr(loss, 'derivatives'):
+                gradient, hessian = loss.derivatives(target, scores)
+            else:
+                gradient, hessian = loss.g(target, scores), loss.h(target, scores)
             denominator = self.reg + np.dot(hessian, np.square(column))
             weight = 0.0 if denominator <= 0 else -np.dot(gradient, column) / denominator
             weights[index] = weight
             self.rules_[index].y = float(weight)
             scores += column * weight
-        weights = self._calculate_weights(updater, data, target)
+        weights = self.calculate_weights(updater, data, target)
         for rule, weight in zip(self.rules_, weights):
             rule.y = float(weight)
         self._training_scores_ = self.training_rule_matrix_ @ weights
 
-    def _find_independent_query(self, data, target, context_matrix, encoder, params, verbose):
+    def find_independent_query(self, data, target, context_matrix, encoder, params, verbose):
         forbidden = [self.training_rule_matrix_[:, index].astype(bool) for index, rule in enumerate(self.rules_)
                      if isinstance(rule.q, Conjunction)]
         retry_limit = max(8, min(len(encoder.propositions_) + 1, len(data) + 1))
         reason = 'no_query'
-        objective = self._new_objective(data, target, context_matrix, encoder)
+        objective = self.objective_function(data, target, predictions=self._training_scores_, loss=self.loss, reg=self.reg,
+                                           rules=self.rules_, orth_basis=self._basis_.values, context_matrix=context_matrix,
+                                           propositions=encoder.propositions_, encoder=encoder, feature_names=self.feature_names_in_,
+                                           **(self.objective_params or {}))
         for _ in range(retry_limit):
             query = objective.search(method=self.search, verbose=max(bool(verbose), bool(self.verbose)),
                                      forbidden_masks=forbidden, **params)
@@ -334,14 +533,7 @@ class GeneralRuleBoostingEstimator:
                 return None, objective, None, reason
         return None, objective, None, reason
 
-    def _new_objective(self, data, target, context_matrix, encoder):
-        return self.objective_function(data, target, predictions=self._training_scores_, loss=self.loss, reg=self.reg,
-                                       rules=self.rules_, orth_basis=self._basis_.values,
-                                       context_matrix=context_matrix, propositions=encoder.propositions_,
-                                       encoder=encoder, feature_names=self.feature_names_in_,
-                                       **(self.objective_params or {}))
-
-    def _initialise_training_cache(self, data):
+    def initialise_training_cache(self, data):
         if not len(self.rules_):
             self.training_rule_matrix_ = np.empty((len(data), 0), dtype=np.float64)
             self._training_scores_ = np.zeros(len(data), dtype=np.float64)
@@ -350,13 +542,13 @@ class GeneralRuleBoostingEstimator:
         weights = np.asarray([rule.y for rule in self.rules_], dtype=np.float64)
         self._training_scores_ = self.training_rule_matrix_ @ weights
 
-    def _append_training_mask(self, mask):
-        mask = np.asarray(mask, dtype=np.float64).reshape(-1, 1)
-        self.training_rule_matrix_ = np.ascontiguousarray(np.column_stack((self.training_rule_matrix_, mask)))
-
-    def _calculate_weights(self, updater, data, target):
+    def calculate_weights(self, updater, data, target, new_rule=False):
         matrix_method = getattr(type(updater), 'calc_weight_from_matrix', None)
         if matrix_method is not None and matrix_method is not WeightUpdateMethod.calc_weight_from_matrix:
+            if new_rule and 'previous_weights' in signature(matrix_method).parameters:
+                previous = np.asarray([rule.y for rule in self.rules_], dtype=np.float64)
+                previous[-1] = 0.0
+                return updater.calc_weight_from_matrix(target, self.rules_, self.training_rule_matrix_, previous_weights=previous)
             return updater.calc_weight_from_matrix(target, self.rules_, self.training_rule_matrix_)
         return updater.calc_weight(data, target, self.rules_)
 
@@ -382,7 +574,8 @@ class GeneralRuleBoostingEstimator:
         ValueError
             If ``data`` is not two-dimensional or does not contain ``n_features_in_`` columns.
         """
-        self._check_fitted()
+        if not hasattr(self, 'encoder_'):
+            raise RuntimeError('Estimator must be fitted before prediction')
         values = as_2d_array(data)
         if self.rules_.supports_compiled(values):
             return self.rules_(values)
@@ -402,7 +595,7 @@ class GeneralRuleBoostingEstimator:
                 scores += rule.y * rule.q(values)
             return scores
 
-    def _build_prediction_plan(self):
+    def build_prediction_plan(self):
         lookup = {str(proposition): index for index, proposition in enumerate(self.encoder_.propositions_)}
         selected = []
         local_indices = {}
@@ -457,7 +650,9 @@ class GeneralRuleBoostingEstimator:
         ValueError
             If ``data`` has an invalid shape or feature count.
         """
-        return loss_function(self.loss).predictions(self.decision_function(data))
+        loss = loss_function(self.loss)
+        scores = self.decision_function(data)
+        return loss.predictions(scores)
 
     def predict_proba(self, data):
         """Calculate class probabilities for logistic loss.
@@ -486,14 +681,3 @@ class GeneralRuleBoostingEstimator:
         if not hasattr(loss, 'probabilities'):
             raise AttributeError(f'{loss} does not define class probabilities')
         return loss.probabilities(self.decision_function(data))
-
-    def _check_fitted(self):
-        if not hasattr(self, 'encoder_'):
-            raise RuntimeError('Estimator must be fitted before prediction')
-
-
-def _default_search_params(params, max_col_attr=10):
-    defaults = {'order': 'bestboundfirst', 'apx': 1.0, 'max_depth': None, 'max_col_attr': max_col_attr}
-    if params is not None:
-        defaults.update(params)
-    return defaults

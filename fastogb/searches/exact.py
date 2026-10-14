@@ -6,7 +6,8 @@ from math import inf
 
 import numpy as np
 
-from fastogb.kernels import (full_packed_extent, packed_extent_signature, packed_intersection_extent)
+from fastogb.kernels import (complete_packed_closure, find_small_packed_critical_index, full_packed_extent,
+                             packed_extent_signature, packed_intersection_extent)
 from fastogb.logic import Conjunction
 from fastogb.parallel import numba_threads, resolve_numba_jobs
 from fastogb.searches.boundaries import Node, make_boundary
@@ -41,18 +42,18 @@ class CoreQueryTreeSearch:
             raise ValueError('Parallel search thresholds must be positive')
         self.forbidden_signatures = set(forbidden_signatures or ())
         self.with_depth = accepts_depth(obj)
-        self._reset_stats()
+        self.reset_stats()
 
-    def _reset_stats(self):
+    def reset_stats(self):
         self.popped = 0
         self.created = 0
         self.avg_created_length = 0.0
         self.pruned = 0
 
-    def _objective(self, extent, depth):
+    def objective(self, extent, depth):
         return self.f(extent, depth) if self.with_depth else self.f(extent)
 
-    def _bound(self, extent, depth):
+    def bound(self, extent, depth):
         return self.g(extent, depth) if self.with_depth else self.g(extent)
 
     def traversal(self):
@@ -60,74 +61,69 @@ class CoreQueryTreeSearch:
         manager = ThreadPoolExecutor(max_workers=self.n_jobs) if use_executor else nullcontext(None)
         thread_manager = numba_threads(self.n_jobs) if hasattr(self.f, 'exact_batch') else nullcontext()
         with thread_manager, manager as executor:
-            yield from self._traversal(executor)
+            self.reset_stats()
+            boundary = make_boundary(self.order)
+            full = self.ctx.extension([])
+            packed_full = full_packed_extent(self.ctx.m)
+            root = Node([], np.zeros(self.ctx.n, dtype=bool), full, packed_full, -1, self.ctx.n,
+                        self.objective(full, 0), inf, self.allowed(packed_full))
+            best = root if root.allowed else None
+            yield root
+            boundary.push(([(index, self.ctx.n, inf) for index in range(self.ctx.n)], root))
+            self.created = 1
 
-    def _traversal(self, executor):
-        self._reset_stats()
-        boundary = make_boundary(self.order)
-        full = self.ctx.extension([])
-        packed_full = full_packed_extent(self.ctx.m)
-        root = Node([], np.zeros(self.ctx.n, dtype=bool), full, packed_full, -1, self.ctx.n,
-                    self._objective(full, 0), inf, self._allowed(packed_full))
-        best = root if root.allowed else None
-        yield root
-        boundary.push(([(index, self.ctx.n, inf) for index in range(self.ctx.n)], root))
-        self.created = 1
-
-        while boundary:
-            operations, current = boundary.pop()
-            self.popped += 1
-            best_value = -inf if best is None else best.val
-            candidates = []
-            for augmentation, inherited_crit, inherited_bound in operations:
-                if not self._skip(current, augmentation, inherited_crit, inherited_bound, best_value):
-                    candidates.append((current, augmentation, inherited_crit))
-            if hasattr(self.f, 'exact_batch'):
-                evaluations = self._evaluate_batch(candidates)
-            elif executor is not None and len(candidates) >= self.parallel_min_candidates:
-                evaluations = executor.map(self._evaluate, candidates)
-            else:
-                evaluations = map(self._evaluate, candidates)
-            children = []
-            for augmentation, inherited_crit, extension, packed_extension, generator, value, bound in evaluations:
+            while boundary:
+                operations, current = boundary.pop()
+                self.popped += 1
                 best_value = -inf if best is None else best.val
-                if bound * self.apx < best_value and value <= best_value:
-                    self.pruned += 1
-                    continue
-                child = self._make_child(current, generator, extension, packed_extension, augmentation,
-                                         inherited_crit, value, bound)
-                if child.allowed and (best is None or child.val > best.val):
-                    best = child
-                children.append(child)
-                yield child
-                if best is not None and best.val >= self.apx * current.val_bound and self.order == 'bestboundfirst':
-                    return
-            best_value = -inf if best is None else best.val
-            active = [(child.gen_index, child.crit_idx, child.val_bound) for child in children
-                      if child.val_bound * self.apx > best_value]
-            for child in children:
-                if child.valid and (not self.max_depth or len(child.generator) < self.max_depth):
-                    boundary.push((active, child))
+                candidates = []
+                for augmentation, inherited_crit, inherited_bound in operations:
+                    if not self.skip(current, augmentation, inherited_crit, inherited_bound, best_value):
+                        candidates.append((current, augmentation, inherited_crit))
+                if hasattr(self.f, 'exact_batch'):
+                    evaluations = self.evaluate_batch(candidates)
+                elif executor is not None and len(candidates) >= self.parallel_min_candidates:
+                    evaluations = executor.map(self.evaluate, candidates)
+                else:
+                    evaluations = map(self.evaluate, candidates)
+                children = []
+                for augmentation, inherited_crit, extension, packed_extension, generator, value, bound in evaluations:
+                    best_value = -inf if best is None else best.val
+                    if bound * self.apx < best_value and value <= best_value:
+                        self.pruned += 1
+                        continue
+                    child = self.make_child(current, generator, extension, packed_extension, augmentation, inherited_crit, value, bound)
+                    if child.allowed and (best is None or child.val > best.val):
+                        best = child
+                    children.append(child)
+                    yield child
+                    if best is not None and best.val >= self.apx * current.val_bound and self.order == 'bestboundfirst':
+                        return
+                best_value = -inf if best is None else best.val
+                active = [(child.gen_index, child.crit_idx, child.val_bound) for child in children
+                          if child.val_bound * self.apx > best_value]
+                for child in children:
+                    if child.valid and (not self.max_depth or len(child.generator) < self.max_depth):
+                        boundary.push((active, child))
 
-    def _allowed(self, packed_extension):
+    def allowed(self, packed_extension):
         return packed_extent_signature(packed_extension, self.ctx.m) not in self.forbidden_signatures
 
-    def _skip(self, current, augmentation, inherited_crit, inherited_bound, best_value):
+    def skip(self, current, augmentation, inherited_crit, inherited_bound, best_value):
         return (augmentation <= current.gen_index or inherited_crit < current.gen_index
                 or inherited_bound * self.apx <= best_value or current.closure[augmentation]
                 or self.ctx.incompatible(current.generator, augmentation))
 
-    def _evaluate(self, candidate):
+    def evaluate(self, candidate):
         current, augmentation, inherited_crit = candidate
-        packed_extension, extension = packed_intersection_extent(
-            current.packed_extension, self.ctx.packed_extents[augmentation], self.ctx.m
-        )
+        packed_extension, extension = packed_intersection_extent(current.packed_extension, self.ctx.packed_extents[augmentation],
+                                                                self.ctx.m)
         generator = [*current.generator, augmentation]
-        value = self._objective(extension, len(generator))
-        bound = self._bound(extension, len(generator))
+        value = self.objective(extension, len(generator))
+        bound = self.bound(extension, len(generator))
         return augmentation, inherited_crit, extension, packed_extension, generator, value, bound
 
-    def _evaluate_batch(self, candidates):
+    def evaluate_batch(self, candidates):
         if not candidates:
             return ()
         current = candidates[0][0]
@@ -135,9 +131,7 @@ class CoreQueryTreeSearch:
         depth = len(current.generator) + 1
         enough_work = self.ctx.m * len(candidates) >= self.parallel_min_work
         parallel = self.n_jobs > 1 and len(candidates) >= self.parallel_min_candidates and enough_work
-        children, values, bounds = self.f.exact_batch(
-            current.packed_extension, self.ctx.packed_extents, indices, depth, parallel
-        )
+        children, values, bounds = self.f.exact_batch(current.packed_extension, self.ctx.packed_extents, indices, depth, parallel)
         evaluations = []
         for output, (_, augmentation, inherited_crit) in enumerate(candidates):
             packed_extension = children[output]
@@ -146,7 +140,7 @@ class CoreQueryTreeSearch:
                                 float(values[output]), float(bounds[output])))
         return evaluations
 
-    def _make_child(self, current, generator, extension, packed_extension, augmentation, inherited_crit, value, bound):
+    def make_child(self, current, generator, extension, packed_extension, augmentation, inherited_crit, value, bound):
         self.created += 1
         self.avg_created_length += (len(generator) - self.avg_created_length) / self.created
         closure = current.closure.copy()
@@ -154,12 +148,12 @@ class CoreQueryTreeSearch:
         if inherited_crit < augmentation and not current.closure[inherited_crit]:
             crit_index = inherited_crit
         else:
-            crit_index = self.ctx.find_small_crit_index(augmentation, packed_extension, closure)
+            crit_index = find_small_packed_critical_index(augmentation, packed_extension, closure, self.ctx.packed_extents)
         if crit_index > augmentation:
-            crit_index = self.ctx.complete_closure(augmentation, packed_extension, closure)
+            crit_index = complete_packed_closure(augmentation, packed_extension, closure, self.ctx.packed_extents)
         else:
             closure[crit_index] = True
-        allowed = self._allowed(packed_extension)
+        allowed = self.allowed(packed_extension)
         return Node(generator, closure, extension, packed_extension, augmentation, crit_index, value, bound, allowed,
                     self.ctx.m)
 
@@ -173,7 +167,7 @@ class CoreQueryTreeSearch:
         if optimum is None:
             return None
         if not optimum.valid:
-            self.ctx.complete_closure(optimum.gen_index, optimum.packed_extension, optimum.closure)
+            complete_packed_closure(optimum.gen_index, optimum.packed_extension, optimum.closure, self.ctx.packed_extents)
         closure = np.flatnonzero(optimum.closure).tolist()
         generator = self.ctx.greedy_simplification(closure, optimum.extension)
         if self.verbose:

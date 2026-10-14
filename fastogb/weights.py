@@ -16,16 +16,44 @@ def rule_matrix(data, rules):
 
 
 class WeightUpdateMethod:
-    def __init__(self, loss='squared', reg=1.0):
+    """Configure coefficient calculation; ``None`` lets the estimator choose its fixed default-rule prefix.
+
+    ``learning_rate`` defaults to one and must be finite and in (0, 1]. ``fixed_prefix`` is a non-negative integer
+    or None. Direct calls treat None as zero. Custom methods decide whether to use ``apply_learning_rate``.
+    """
+
+    def __init__(self, loss='squared', reg=1.0, learning_rate=1.0, fixed_prefix=None):
         self.loss = loss
         self.reg = float(reg)
-        self.fixed_prefix = 0
+        self.learning_rate = float(learning_rate)
+        self.fixed_prefix = fixed_prefix
+        if not np.isfinite(self.learning_rate) or not 0 < self.learning_rate <= 1:
+            raise ValueError('learning_rate must be finite and in (0, 1]')
+        if fixed_prefix is not None and (isinstance(fixed_prefix, bool) or not isinstance(fixed_prefix, (int, np.integer))
+                                         or fixed_prefix < 0):
+            raise ValueError('fixed_prefix must be a non-negative integer or None')
+
+    def __setstate__(self, state):
+        """Restore updater defaults from versions preceding learning rates and explicit prefix configuration."""
+        self.__dict__.update(state)
+        if 'learning_rate' not in state:
+            self.learning_rate = 1.0
+            if state.get('fixed_prefix', 0) == 0:
+                self.fixed_prefix = None
 
     def calc_weight(self, data, target, rules):
-        return self.calc_weight_from_matrix(target, rules, rule_matrix(data, rules))
+        matrix = rule_matrix(data, rules)
+        return self.calc_weight_from_matrix(target, rules, matrix)
 
     def calc_weight_from_matrix(self, target, rules, matrix):
         raise NotImplementedError
+
+    def apply_learning_rate(self, previous, proposed):
+        """Apply this updater's coefficient step; initial estimator fitting uses a copied updater with rate one."""
+        rate = float(getattr(self, 'learning_rate', 1.0))
+        if not np.isfinite(rate) or not 0 < rate <= 1:
+            raise ValueError('learning_rate must be finite and in (0, 1]')
+        return proposed if rate == 1 else previous + rate * (proposed - previous)
 
 
 class KeepWeight(WeightUpdateMethod):
@@ -36,21 +64,26 @@ class KeepWeight(WeightUpdateMethod):
 
 
 class FullyCorrective(WeightUpdateMethod):
-    """Jointly optimise every rule weight without constructing a dense Hessian diagonal."""
+    """Jointly optimise active weights and apply the configured coefficient step from their previous values.
 
-    def __init__(self, loss='squared', reg=1.0, solver='Newton-CG', options=None):
-        super().__init__(loss, reg)
+    ``previous_weights`` in matrix calls is optional and supplies the interpolation origin for newly added rules.
+    The initial solver point still comes from the rule coefficients. A rate of one returns the unmodified optimum.
+    """
+
+    def __init__(self, loss='squared', reg=1.0, solver='Newton-CG', options=None, learning_rate=1.0, fixed_prefix=None):
+        super().__init__(loss, reg, learning_rate, fixed_prefix)
         self.solver = solver
         self.options = options
 
-    def calc_weight_from_matrix(self, target, rules, matrix):
+    def calc_weight_from_matrix(self, target, rules, matrix, previous_weights=None):
         matrix = np.asarray(matrix, dtype=np.float64)
         target = np.asarray(target, dtype=np.float64)
         if matrix.shape[1] == 0:
             return np.empty(0, dtype=np.float64)
         loss = loss_function(self.loss)
         initial = np.asarray([rule.y for rule in rules], dtype=np.float64)
-        fixed = min(int(self.fixed_prefix), matrix.shape[1])
+        previous = initial if previous_weights is None else np.asarray(previous_weights, dtype=np.float64)
+        fixed = min(int(self.fixed_prefix or 0), matrix.shape[1])
         if fixed == matrix.shape[1]:
             return initial
         fixed_scores = matrix[:, :fixed] @ initial[:fixed] if fixed else np.zeros(len(target), dtype=np.float64)
@@ -62,7 +95,7 @@ class FullyCorrective(WeightUpdateMethod):
                 solution = np.linalg.solve(system, response)
             except np.linalg.LinAlgError:
                 solution = np.linalg.lstsq(system, response, rcond=None)[0]
-            return np.concatenate((initial[:fixed], solution))
+            return self.apply_learning_rate(previous, np.concatenate((initial[:fixed], solution)))
         active_initial = initial[fixed:]
 
         def risk(weights):
@@ -93,17 +126,20 @@ class FullyCorrective(WeightUpdateMethod):
         stationarity = np.linalg.norm(gradient(result.x), ord=np.inf)
         if not result.success and stationarity > 1e-6 * (1 + np.linalg.norm(result.x, ord=np.inf)):
             raise RuntimeError(f'Weight optimisation failed: {result.message}')
-        return np.concatenate((initial[:fixed], result.x))
+        return self.apply_learning_rate(previous, np.concatenate((initial[:fixed], result.x)))
 
 
 class LineSearch(WeightUpdateMethod):
     """Optimise only the newest rule weight while retaining earlier weights."""
 
-    def calc_weight_from_matrix(self, target, rules, matrix):
+    def calc_weight_from_matrix(self, target, rules, matrix, previous_weights=None):
         matrix = np.asarray(matrix, dtype=np.float64)
         target = np.asarray(target, dtype=np.float64)
         weights = np.asarray([rule.y for rule in rules], dtype=np.float64)
+        previous = weights if previous_weights is None else np.asarray(previous_weights, dtype=np.float64)
         if not len(weights):
+            return weights
+        if len(weights) <= int(self.fixed_prefix or 0):
             return weights
         loss = loss_function(self.loss)
         fixed_scores = matrix[:, :-1] @ weights[:-1]
@@ -123,8 +159,9 @@ class LineSearch(WeightUpdateMethod):
             raise FloatingPointError(f'Line search failed: {result.message}')
         if not result.success and abs(gradient(result.x)[0]) > 1e-6 * (1 + abs(result.x[0])):
             raise RuntimeError(f'Line search failed: {result.message}')
-        weights[-1] = result.x[0]
-        return weights
+        proposed = weights.copy()
+        proposed[-1] = result.x[0]
+        return self.apply_learning_rate(previous, proposed)
 
 
 def initial_constant(loss, target):

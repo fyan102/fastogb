@@ -8,7 +8,7 @@ from numbers import Number
 import numpy as np
 
 from fastogb.kernels import proposition_matrix
-from fastogb.logic import Constraint, KeyValueProposition
+from fastogb.logic import Constraint, KeyValueProposition, is_missing
 
 
 _OPERATION_CODES = {'<': 0, '<=': 1, '>': 2, '>=': 3, '==': 4}
@@ -50,59 +50,55 @@ class PropositionEncoder:
         values = as_2d_array(data)
         self.n_features_in_ = values.shape[1]
         self.feature_names_in_ = infer_feature_names(data, values.shape[1], self.feature_names)
-        excluded = self._column_indices(without or ())
-        self.categorical_indices_ = self._categorical_indices(values)
+        excluded = self.column_indices(without or ())
+        self.categorical_indices_ = self.categorical_indices(values)
         self.category_maps_ = {}
         propositions = []
         for index, name in enumerate(self.feature_names_in_):
             if index in excluded:
                 continue
             column = values[:, index]
-            factory = (
-                self._categorical_propositions if index in self.categorical_indices_ else self._numeric_propositions
-            )
+            factory = self.categorical_propositions if index in self.categorical_indices_ else self.numeric_propositions
             propositions.extend(factory(column, index, name))
         self.propositions_ = tuple(propositions)
-        self._build_descriptors()
+        self.build_descriptors()
         return self
 
     def transform(self, data, proposition_indices=None, parallel=None):
-        self._check_fitted()
+        if not hasattr(self, 'propositions_'):
+            raise RuntimeError('PropositionEncoder must be fitted before transform')
         values = as_2d_array(data)
         if values.shape[1] != self.n_features_in_:
             raise ValueError(f'Expected {self.n_features_in_} columns, received {values.shape[1]}')
-        indices = self._proposition_indices(proposition_indices)
+        indices = self.proposition_indices(proposition_indices)
         if not len(indices):
             return np.empty((len(values), 0), dtype=bool)
-        encoded = self._encode_columns(values, np.unique(self.proposition_columns_[indices]))
+        encoded = self.encode_columns(values, np.unique(self.proposition_columns_[indices]))
         return proposition_matrix(encoded, self.proposition_columns_[indices], self.proposition_operations_[indices],
                                   self.proposition_operands_[indices], parallel=parallel)
 
     def fit_transform(self, data, without=None):
-        return self.fit(data, without=without).transform(data)
+        self.fit(data, without=without)
+        return self.transform(data)
 
-    def _check_fitted(self):
-        if not hasattr(self, 'propositions_'):
-            raise RuntimeError('PropositionEncoder must be fitted before transform')
-
-    def _column_indices(self, columns):
+    def column_indices(self, columns):
         names = {name: index for index, name in enumerate(self.feature_names_in_)}
         return {names[column] if column in names else int(column) for column in columns}
 
-    def _categorical_indices(self, values):
+    def categorical_indices(self, values):
         if self.categorical is None:
             if values.dtype.kind in 'iuf':
                 return set()
             if values.dtype.kind in 'bSU':
                 return set(range(values.shape[1]))
-            return {index for index in range(values.shape[1]) if not _is_numeric(values[:, index])}
+            return {index for index in range(values.shape[1]) if not is_numeric(values[:, index])}
         if isinstance(self.categorical, np.ndarray) and self.categorical.dtype == bool:
             if self.categorical.shape != (values.shape[1],):
                 raise ValueError('Categorical mask must contain one entry per feature')
             return set(np.flatnonzero(self.categorical))
-        return self._column_indices(self.categorical)
+        return self.column_indices(self.categorical)
 
-    def _categorical_propositions(self, column, index, name):
+    def categorical_propositions(self, column, index, name):
         if column.dtype.kind in 'SU':
             unique, first, frequencies = np.unique(column, return_index=True, return_counts=True)
             order = np.argsort(first, kind='stable')
@@ -112,7 +108,7 @@ class PropositionEncoder:
             counts = {}
             missing = False
             for value in column:
-                if _is_missing(value):
+                if is_missing(value):
                     missing = True
                 else:
                     counts[value] = counts.get(value, 0) + 1
@@ -125,13 +121,13 @@ class PropositionEncoder:
             propositions.append(KeyValueProposition(name, Constraint.missing(), index))
         return propositions
 
-    def _numeric_propositions(self, column, index, name):
+    def numeric_propositions(self, column, index, name):
         numeric = np.asarray(column, dtype=np.float64)
         finite = numeric[np.isfinite(numeric)]
         unique = np.unique(finite)
         propositions = []
         if len(unique) > 1:
-            max_attributes = self._max_attributes(index, name)
+            max_attributes = self.max_attributes(index, name)
             if max_attributes is not None and 2 * len(unique) > max_attributes:
                 count = max(1, max_attributes // 2)
                 # Match the legacy qcut search space by retaining every upper bin edge, including the maximum.
@@ -149,12 +145,12 @@ class PropositionEncoder:
             propositions.append(KeyValueProposition(name, Constraint.missing(), index))
         return propositions
 
-    def _max_attributes(self, index, name):
+    def max_attributes(self, index, name):
         if not isinstance(self.max_col_attr, Mapping):
             return self.max_col_attr
         return self.max_col_attr[name] if name in self.max_col_attr else self.max_col_attr.get(index)
 
-    def _build_descriptors(self):
+    def build_descriptors(self):
         columns = []
         operations = []
         operands = []
@@ -175,7 +171,7 @@ class PropositionEncoder:
         self.proposition_operations_ = np.ascontiguousarray(operations, dtype=np.int8)
         self.proposition_operands_ = np.ascontiguousarray(operands, dtype=np.float64)
 
-    def _proposition_indices(self, proposition_indices):
+    def proposition_indices(self, proposition_indices):
         if proposition_indices is None:
             return np.arange(len(self.propositions_), dtype=np.int64)
         indices = np.asarray(proposition_indices, dtype=np.int64).reshape(-1)
@@ -183,7 +179,7 @@ class PropositionEncoder:
             raise IndexError('Proposition index is outside the fitted encoder')
         return indices
 
-    def _encode_columns(self, values, columns):
+    def encode_columns(self, values, columns):
         encoded = np.zeros((len(values), self.n_features_in_), dtype=np.float64)
         for column in columns:
             if column not in self.categorical_indices_:
@@ -193,35 +189,22 @@ class PropositionEncoder:
             raw = values[:, column]
             if len(values) < 256 or len(mapping) > 32:
                 for row, value in enumerate(raw):
-                    encoded[row, column] = -1.0 if _is_missing(value) else float(mapping.get(value, -2))
+                    encoded[row, column] = -1.0 if is_missing(value) else float(mapping.get(value, -2))
                 continue
             codes = np.full(len(values), -2.0)
             for value, code in mapping.items():
                 codes[np.equal(raw, value)] = code
             for row in np.flatnonzero(codes == -2):
-                if _is_missing(raw[row]):
+                if is_missing(raw[row]):
                     codes[row] = -1.0
             encoded[:, column] = codes
         return encoded
 
 
-def _is_numeric(column):
+def is_numeric(column):
     for value in column:
-        if _is_missing(value):
+        if is_missing(value):
             continue
         if isinstance(value, (bool, np.bool_)) or not isinstance(value, Number):
             return False
     return True
-
-
-def _is_missing(value):
-    if value is None:
-        return True
-    if isinstance(value, (str, bytes, np.str_, np.bytes_)):
-        return False
-    if isinstance(value, (float, np.floating)):
-        return bool(np.isnan(value))
-    try:
-        return bool(np.isnan(value))
-    except (TypeError, ValueError):
-        return False

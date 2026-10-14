@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from fastogb.prediction import build_rule_collection_plan, evaluate_rule_collection
+from fastogb.prediction import build_rule_collection_plan, evaluate_rule_collection, normalise_data
 
 
 class RuleEnsembleCollection:
@@ -38,7 +38,7 @@ class RuleEnsembleCollection:
         scores = evaluate_rule_collection(data, self._evaluation_plan, self.n_jobs)
         if scores is not None:
             return scores
-        values = _as_2d_data(data)
+        _, values = normalise_data(data)
         columns = []
         for member, ensemble in zip(self.members, self.ensembles):
             method = getattr(member, 'decision_function', None)
@@ -51,12 +51,3 @@ class RuleEnsembleCollection:
         if not self.members:
             raise ValueError('Cannot choose from an empty rule ensemble collection')
         return np.argmax(self.decision_function(data), axis=1)
-
-
-def _as_2d_data(data):
-    values = data.to_numpy(copy=False) if hasattr(data, 'to_numpy') else np.asarray(data)
-    if values.ndim == 1:
-        return values.reshape(1, -1)
-    if values.ndim != 2:
-        raise ValueError(f'Expected one- or two-dimensional feature data, received shape {values.shape}')
-    return data

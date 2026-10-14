@@ -8,7 +8,8 @@ papers
 .vscode
 realkd
 old_repo
-tests
+tests/*
+!tests/test_adaptation.py
 notebooks
 benchmarks
 .ipynb_checkpoints

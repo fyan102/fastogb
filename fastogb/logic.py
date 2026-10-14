@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from functools import partialmethod
 from typing import Any, Callable
 
 import numpy as np
@@ -27,46 +28,30 @@ class Constraint:
         return f'Constraint({format(self, "x")})'
 
     @classmethod
-    def _comparison(cls, op, value, function):
+    def comparison(cls, op, value=None, function=None):
+        if op == 'missing':
+            return cls(missing_mask, lambda name: f'{name} is missing', 'missing')
+        if not callable(function):
+            raise TypeError('Comparison function must be callable')
         return cls(lambda x: function(x, value), lambda name: f'{name}{op}{value}', op, value)
 
-    @classmethod
-    def less_equals(cls, value):
-        return cls._comparison('<=', value, operator.le)
-
-    @classmethod
-    def less(cls, value):
-        return cls._comparison('<', value, operator.lt)
-
-    @classmethod
-    def greater_equals(cls, value):
-        return cls._comparison('>=', value, operator.ge)
-
-    @classmethod
-    def greater(cls, value):
-        return cls._comparison('>', value, operator.gt)
-
-    @classmethod
-    def equals(cls, value):
-        return cls._comparison('==', value, operator.eq)
-
-    @classmethod
-    def not_equals(cls, value):
-        return cls._comparison('!=', value, operator.ne)
-
-    @classmethod
-    def missing(cls):
-        return cls(_missing_mask, lambda name: f'{name} is missing', 'missing')
+    less_equals = partialmethod(comparison, '<=', function=operator.le)
+    less = partialmethod(comparison, '<', function=operator.lt)
+    greater_equals = partialmethod(comparison, '>=', function=operator.ge)
+    greater = partialmethod(comparison, '>', function=operator.gt)
+    equals = partialmethod(comparison, '==', function=operator.eq)
+    not_equals = partialmethod(comparison, '!=', function=operator.ne)
+    missing = partialmethod(comparison, 'missing')
 
 
-def _missing_mask(values):
+def missing_mask(values):
     values = np.asarray(values)
     if values.dtype.kind in 'fc':
         return np.isnan(values)
-    return np.frompyfunc(_is_missing, 1, 1)(values).astype(bool)
+    return np.frompyfunc(is_missing, 1, 1)(values).astype(bool)
 
 
-def _is_missing(value):
+def is_missing(value):
     if value is None:
         return True
     if isinstance(value, (str, bytes, np.str_, np.bytes_)):
@@ -79,18 +64,13 @@ def _is_missing(value):
         return False
 
 
-_operator_factory = {
-    '==': Constraint.equals,
-    '!=': Constraint.not_equals,
-    '>': Constraint.greater,
-    '<': Constraint.less,
-    '>=': Constraint.greater_equals,
-    '<=': Constraint.less_equals,
-}
+_operator_factory = {'==': Constraint.equals, '!=': Constraint.not_equals, '>': Constraint.greater,
+                     '<': Constraint.less, '>=': Constraint.greater_equals, '<=': Constraint.less_equals}
 
 
 def constraint_from_op_string(op, value):
-    return _operator_factory[op](value)
+    factory = _operator_factory[op]
+    return factory(value)
 
 
 class KeyValueProposition:
@@ -103,12 +83,12 @@ class KeyValueProposition:
         self.repr = format(constraint, key)
 
     def __call__(self, data):
-        values = self._column(data)
+        values = self.column(data)
         if self.constraint.op in {'<', '<=', '>', '>='}:
             values = np.asarray(values, dtype=np.float64)
         return self.constraint(values)
 
-    def _column(self, data):
+    def column(self, data):
         if isinstance(data, np.ndarray):
             if self.column_index is None:
                 if data.dtype.names and self.key in data.dtype.names:

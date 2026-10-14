@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 
-def _intersect_kernel(left, right):
+
+def intersect_kernel(left, right):
     result = np.empty(min(len(left), len(right)), dtype=np.int64)
     left_index = 0
     right_index = 0
@@ -25,12 +26,14 @@ def _intersect_kernel(left, right):
     return result[:result_index]
 
 
-_compiled_intersect = njit(cache=True, nogil=True)(_intersect_kernel)
+_compiled_intersect = njit(cache=True, nogil=True)(intersect_kernel)
 
 
 def intersect_sorted(left, right):
     left = np.asarray(left, dtype=np.int64)
     right = np.asarray(right, dtype=np.int64)
     return _compiled_intersect(left, right)
+
+
 def extent_signature(mask):
     return np.packbits(np.asarray(mask, dtype=np.uint8), bitorder='little').tobytes()

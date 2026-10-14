@@ -6,7 +6,7 @@ import numpy as np
 
 from fastogb.array_ops import intersect_sorted
 from fastogb.encoding import PropositionEncoder, as_2d_array
-from fastogb.kernels import complete_packed_closure, find_small_packed_critical_index, pack_masks
+from fastogb.kernels import pack_masks
 from fastogb.logic import KeyValueProposition, TabulatedProposition
 from fastogb.searches import CoreQueryTreeSearch, GreedySearch, OrthogonalBeamSearch
 from fastogb.searches.common import accepts_depth
@@ -38,7 +38,7 @@ class Context:
         if matrix.ndim != 2:
             raise ValueError(f'Expected a two-dimensional binary matrix, received shape {matrix.shape}')
         context = cls.__new__(cls)
-        context._initialise(matrix, attributes, objects, sort_attributes, encoder)
+        context.initialise(matrix, attributes, objects, sort_attributes, encoder)
         return context
 
     def __init__(self, attributes, objects, sort_attributes=True):
@@ -46,9 +46,9 @@ class Context:
         matrix = np.empty((len(objects), len(attributes)), dtype=bool)
         for column, attribute in enumerate(attributes):
             matrix[:, column] = [bool(attribute(obj)) for obj in objects]
-        self._initialise(matrix, attributes, objects, sort_attributes, None)
+        self.initialise(matrix, attributes, objects, sort_attributes, None)
 
-    def _initialise(self, matrix, attributes, objects, sort_attributes, encoder):
+    def initialise(self, matrix, attributes, objects, sort_attributes, encoder):
         self.matrix = np.ascontiguousarray(matrix, dtype=bool)
         self.m, self.n = self.matrix.shape
         self.attributes = list(attributes or [TabulatedProposition(self.matrix, i) for i in range(self.n)])
@@ -87,12 +87,6 @@ class Context:
             available.remove(best)
         return result
 
-    def find_small_crit_index(self, gen_index, packed_extension, closure):
-        return find_small_packed_critical_index(gen_index, packed_extension, closure, self.packed_extents)
-
-    def complete_closure(self, gen_index, packed_extension, closure):
-        return complete_packed_closure(gen_index, packed_extension, closure, self.packed_extents)
-
     def incompatible(self, generator, augmentation):
         proposition = self.attributes[augmentation]
         if not isinstance(proposition, KeyValueProposition) or not proposition.is_exclusive:
@@ -119,9 +113,7 @@ def validate_bound(context, objective, bound, max_attributes=16, atol=1e-12):
         parent_bound = bound(extents[parent], len(parent)) if bound_with_depth else bound(extents[parent])
         for child, value in values.items():
             if parent_set.issubset(child) and value > parent_bound + atol:
-                raise AssertionError(
-                    f'Invalid bound for intent {parent}: {parent_bound} is below {value} at descendant {child}'
-                )
+                raise AssertionError(f'Invalid bound for intent {parent}: {parent_bound} is below {value} at descendant {child}')
     return True
 
 

@@ -5,7 +5,7 @@ import csv
 import numpy as np
 
 
-def _parse_feature(values):
+def parse_feature(values):
     values = [value.strip() for value in values]
     try:
         return [np.nan if value == '' else float(value) for value in values], False
@@ -33,7 +33,7 @@ def load_csv(path, target_name=None, drop=(), target_map=None):
     categorical = []
 
     for index, name in enumerate(feature_names):
-        column, is_categorical = _parse_feature([record[name] for record in records])
+        column, is_categorical = parse_feature([record[name] for record in records])
         X[:, index] = column
         if is_categorical:
             categorical.append(name)

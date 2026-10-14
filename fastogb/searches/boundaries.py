@@ -41,15 +41,13 @@ class QueueBoundary:
     def __init__(self, lifo=False):
         self.items = deque()
         self.lifo = lifo
+        self.push = self.items.append
 
     def __bool__(self):
         return bool(self.items)
 
     def __len__(self):
         return len(self.items)
-
-    def push(self, item):
-        self.items.append(item)
 
     def pop(self):
         return self.items.pop() if self.lifo else self.items.popleft()
@@ -80,7 +78,5 @@ def make_boundary(order):
         return QueueBoundary()
     if order == 'depthfirst':
         return QueueBoundary(lifo=True)
-    priority = (lambda node: (-node.val_bound, -node.val)) if order == 'bestboundfirst' else (
-        lambda node: (-node.val, -node.val_bound)
-    )
+    priority = (lambda node: (-node.val_bound, -node.val)) if order == 'bestboundfirst' else (lambda node: (-node.val, -node.val_bound))
     return PriorityBoundary(priority)

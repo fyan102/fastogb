@@ -7,11 +7,10 @@ Install the `fastogb` distribution from PyPI with `pip install fastogb`, then im
 ## Constructor
 
 ```python
-GeneralRuleBoostingEstimator(
-    num_rules=3, objective_function=OrthogonalBoostingObjective, weight_update_method=FullyCorrective,
-    loss='squared', reg=1.0, search='greedy', include_default_rule=False,
-    include_linear_terms=False, max_col_attr=10, search_params=None, verbose=False, basis_rtol=None,
-    objective_params=None, max_components=10_000, n_jobs=1)
+GeneralRuleBoostingEstimator(num_rules=3, objective_function=GradientBoostingObjectiveXGB, weight_update_method=None,
+                             loss='squared', reg=1.0, search='exhaustive', include_default_rule=False,
+                             include_linear_terms=False, max_col_attr=10, search_params=None, verbose=False,
+                             basis_rtol=None, objective_params=None, max_components=10_000, n_jobs=1)
 ```
 
 ### `num_rules=3`
@@ -21,7 +20,7 @@ rule and optional linear terms are base terms and do not count towards this numb
 rules when no admissible independent query remains or when `max_components` is reached. The realised number of
 rules can be inspected through `rules_`, `_base_rule_count_` and `stopping_reason_` after fitting.
 
-### `objective_function=OrthogonalBoostingObjective`
+### `objective_function=GradientBoostingObjectiveXGB`
 
 `objective_function` is an objective class used to score candidate queries during search. Pass the class itself,
 rather than an already constructed instance, because a fresh objective is built at every boosting iteration from the
@@ -37,7 +36,7 @@ implement `__call__(extent)` and `bound(extent)` for exact search. Depth-aware o
 argument. Optimised greedy search can additionally provide `greedy_values`, and orthogonal beam search requires
 `prefix_values`.
 
-### `weight_update_method=FullyCorrective`
+### `weight_update_method=None`
 
 `weight_update_method` accepts an instance of `KeepWeight`, `LineSearch`, `FullyCorrective` or a compatible custom
 `WeightUpdateMethod`. `None` selects `KeepWeight()`. The estimator copies the updater for fitting and overwrites the
@@ -48,6 +47,22 @@ the loss or regularisation.
 while holding earlier weights fixed. `FullyCorrective()` jointly reoptimises all active learned-rule weights after
 every iteration. With squared loss, `FullyCorrective` solves a regularised linear system. With logistic or Poisson
 loss, it uses a SciPy optimiser; its `solver` and `options` are configured on the updater instance.
+
+`FullyCorrective(loss='squared', reg=1.0, solver='Newton-CG', options=None, learning_rate=1.0, fixed_prefix=None)`
+preserves the positional order of all previously supported arguments. `LineSearch` and `KeepWeight` accept
+`loss='squared', reg=1.0, learning_rate=1.0, fixed_prefix=None`.
+
+`learning_rate` is finite and in `(0, 1]`. `FullyCorrective` and `LineSearch` interpolate from the previous weights
+to their proposed weights using `previous + learning_rate * (proposed - previous)`. The rate applies once per
+weight-calculation invocation; growing several rules can invoke the updater several times. A newly added rule has
+previous coefficient zero for this interpolation. `KeepWeight` retains objective-derived coefficients and does not
+apply damping. Custom updaters own their coefficient-step behaviour and require no new method or argument.
+
+Initial fitting copies the updater and sets its learning rate to one, leaving the user's updater unchanged. Subsequent
+growth, weight updates and replacement use its configured rate. `fixed_prefix` is `None` or a non-negative integer:
+the first N coefficients remain fixed. Within the estimator, `None` fixes only the optional default rule. Explicit
+zero optimises all coefficients. Direct updater calls interpret `None` as zero. Old serialized built-in updaters
+receive compatible defaults when loaded.
 
 ### `loss='squared'`
 
@@ -67,7 +82,7 @@ MWG query objective ignores `reg`, although its weight update still uses it. The
 unregularised unless `objective_params={'length_regularisation': True}` is supplied; its weight update still uses
 the estimator's `reg` value.
 
-### `search='greedy'`
+### `search='exhaustive'`
 
 `search` selects the algorithm that maximises the query objective. Accepted strings are `'exhaustive'`, `'greedy'`
 and `'ogb'`. A compatible custom search class may also be supplied.
@@ -81,8 +96,9 @@ The search-specific keys accepted through `search_params` are documented below.
 
 When `include_default_rule` is true, the ensemble starts with a constant rule. Squared loss uses the target mean,
 logistic loss uses the finite log odds of the positive class, and Poisson loss uses the logarithm of the target mean.
-This term is a base rule, so it does not count towards `num_rules`. The default rule remains fixed when the updater
-reoptimises learned rules.
+This term is a base rule, so it does not count towards `num_rules`. With the updater's default `fixed_prefix=None`,
+its coefficient remains fixed during corrective optimisation. Explicit `FullyCorrective(fixed_prefix=0)` includes
+it in coefficient optimisation. Its constant query is protected from structural replacement in either case.
 
 ### `include_linear_terms=False`
 
@@ -207,25 +223,31 @@ through `search_params` so readable rule strings and column alignment are retain
 to `-1.0` and `1.0` through `target_map`.
 
 ```python
-from fastogb import (FullyCorrective, GeneralRuleBoostingEstimator, LogisticLoss,
-                     OrthogonalBoostingObjective, load_csv)
+from fastogb import FullyCorrective, GeneralRuleBoostingEstimator, LogisticLoss, OrthogonalBoostingObjective, load_csv
 
-data, target, feature_names, categorical = load_csv(
-    'tic_tac_toe.csv', target_name='V10', target_map={'negative': -1.0, 'positive': 1.0})
-model = GeneralRuleBoostingEstimator(
-    num_rules=10, objective_function=OrthogonalBoostingObjective,
-    weight_update_method=FullyCorrective(), loss=LogisticLoss(), reg=1.0, search='greedy', n_jobs=4,
-    search_params={'feature_names': feature_names, 'categorical': categorical},
-    objective_params={'epsilon': 1e-4})
+data, target, feature_names, categorical = load_csv('tic_tac_toe.csv', target_name='V10',
+                                                  target_map={'negative': -1.0, 'positive': 1.0})
+model = GeneralRuleBoostingEstimator(num_rules=10, objective_function=OrthogonalBoostingObjective,
+                                    weight_update_method=FullyCorrective(), loss=LogisticLoss(), reg=1.0,
+                                    search='greedy', n_jobs=4,
+                                    search_params={'feature_names': feature_names, 'categorical': categorical},
+                                    objective_params={'epsilon': 1e-4})
 model.fit(data, target)
 ```
 
 ## Public methods
 
-### `fit(data, target, has_origin_rules=False, verbose=False)`
+### `fit(data, target, has_origin_rules=None, verbose=False, *, replacement_selector=no_replacement)`
 
 `fit` learns the requested ensemble and returns the fitted `GeneralRuleBoostingEstimator`. Its complete signature is
-`fit(data, target, has_origin_rules=False, verbose=False)`.
+`fit(data, target, has_origin_rules=None, verbose=False, *, replacement_selector=no_replacement)`.
+
+With omitted `has_origin_rules`, an empty ensemble is fitted initially without damping. Existing ensembles below
+`num_rules` retain their queries and grow towards the target. Once enough learned rules exist, the selector is
+consulted. Its default empty list preserves every query and updates coefficients through the configured updater.
+This intentionally changes repeated ordinary `fit` calls from reset-by-default to automatic adaptation. A callback
+is not called during initial fitting or while an undersized ensemble grows. Existing ensembles above a newly lowered
+`num_rules` are not silently truncated.
 
 #### `data`
 
@@ -251,13 +273,30 @@ and the number of values must equal the row count of `data`. Squared loss accept
 Logistic loss accepts labels encoded exactly as `-1.0` and `1.0`. Poisson loss accepts finite values greater than or
 equal to zero. A classification label mapping can be applied while reading a CSV with `load_csv(..., target_map=...)`.
 
-#### `has_origin_rules=False`
+#### `has_origin_rules=None`
 
-`has_origin_rules` is a Boolean. Its default value, false, starts a new ensemble and discards terms from an earlier
-fit. When it is true on an already fitted estimator, the existing base terms and learned rules are retained.
-Continuing usually requires increasing `num_rules` first, because `num_rules` is the desired total learned-rule count
-rather than the number of additional rules. The histories are reset and record only newly completed iterations from
-the continuing fit. On a fresh estimator, true has the same effect as false because no fitted origin rules exist.
+`None` selects automatic dispatch based on the actual ensemble, including manually copied rules without a fitted
+encoder. Explicit `False` preserves legacy fresh fitting; explicit `True` preserves legacy grow-only continuation,
+which does not automatically reweight an ensemble already at its target. A fresh empty estimator is initialised
+for either Boolean value. Existing positional calls retain their argument order. A custom selector cannot be combined
+with an explicit Boolean legacy argument; use automatic dispatch for selection-controlled replacement.
+
+#### `replacement_selector=no_replacement`
+
+The keyword-only selector is a callable accepting a deep-copied `AdditiveRuleEnsemble` and returning a Python list
+of unique zero-based integer indices into that same ensemble. NumPy integer scalars are accepted; Booleans,
+negative indices, duplicates, out-of-range indices and protected default or linear terms are rejected. Return `[]`
+to keep all rules; `None` is invalid. Selectors should treat the snapshot as read-only. No consolidation or coefficient
+refit precedes selection. A callable object or closure can capture training data, a loss, regularisation, ages or
+other information needed by a custom criterion.
+
+`no_replacement` returns `[]`. `smallest_absolute_weight` selects one learned conjunction with minimum absolute
+coefficient, breaking ties by original ensemble order. Estimator-produced ensembles and selector snapshots carry
+base-term metadata so the selector skips protected terms. A constant learned query remains eligible when no default
+rule is enabled. Standalone ensembles without that metadata treat all conjunctions as learned rules.
+Both functions are available directly from `fastogb`.
+The estimator imposes no separate loss-acceptance condition or `force_update` flag. A removed query may be found
+again by search; there is no implicit novelty restriction beyond the existing surviving-rule extent checks.
 
 #### `verbose=False`
 
@@ -273,6 +312,61 @@ coefficient. A successful call returns `self` and populates the fitted attribute
 model.set_params(num_rules=20)
 model.fit(data, target, has_origin_rules=True)
 ```
+
+### `fit_initial_rules(data, target, verbose=False, *, operation='initial', target_rules=None)`
+
+Starts again with a fresh ensemble, proposition encoder, default term and linear terms. `data` and `target` follow
+the same types and shapes as `fit`, and the new feature schema may differ from the previous one. The updater's
+configured learning rate is bypassed for the whole initial boosting procedure. Iteration and adaptation histories
+are reset. Returns `self`. This is the explicit reset operation for new code.
+
+This method contains the shared training implementation directly. Its keyword-only `operation` accepts `'initial'`,
+`'grow'`, `'continue'`, `'weights'` or `'replace'`; `target_rules` accepts a non-negative integer or `None`, which uses
+`num_rules`. The other fitting methods pass these options to reuse preparation and coefficient calculation without
+duplicating the boosting loop. Ordinary explicit fresh fitting should leave both options at their defaults; use
+`fit`, `update_weights` and `replace_rules` for automatic adaptation and validated replacement selection.
+
+The supporting methods `prepare_base_terms`, `initialise_training_cache`, `initial_basis`, `initialise_base_weights`,
+`find_independent_query`, `calculate_weights` and `build_prediction_plan` use ordinary names and perform separate
+pieces of the training or prediction preparation. They assume the corresponding fitted metadata and staged state
+already exist. Use the fitting and prediction entry points described here for normal model use. The previous
+`_fit_rules`, `_new_objective`, `_append_training_mask`, `_check_fitted` and `_default_search_params` helpers have
+been removed; their necessary work is performed directly at the relevant call sites.
+
+### `update_weights(data, target, verbose=False)`
+
+Keeps every query unchanged and invokes the selected weight updater on the supplied observations and responses.
+`data` has shape `(n_samples, n_features_in_)`; `target` has shape `(n_samples,)` or `(n_samples, 1)` and obeys the
+configured loss domain. Non-empty observations are required. Feature count, known feature names and categorical
+roles must remain compatible. Existing linear-term locations and scales are retained. `FullyCorrective` updates
+its active coefficients, `LineSearch` updates only the last unprotected coefficient, and `KeepWeight` changes none.
+The updater owns its learning rate. Returns `self`; call on an empty unfitted estimator raises `RuntimeError`.
+
+### `replace_rules(data, target, replacement_selector=no_replacement, verbose=False)`
+
+Uses the same data and target contract as `update_weights`. Calls the selector once, validates its indices, removes
+the selected learned rules and regrows the ensemble to at least its previous learned-rule count and the configured
+`num_rules`. Empty selection delegates to `update_weights`. Default and linear terms remain structurally protected.
+Removing every learned conjunction remains adaptation; it does not initialise new base terms or disable damping.
+The updater's configured rate applies during coefficient calculations after adding replacement rules.
+
+Selection does not trigger a preliminary coefficient refit or automatic duplicate-query consolidation. Search and
+weight calculation reuse the ordinary training code, including empty-extent, duplicate-extent and independence
+checks. If search cannot restore the requested count, `RuntimeError` is raised and the pre-replacement ensemble,
+metadata, caches and histories are restored. Other fitting errors also restore the prior replacement state.
+No risk-based rejection is imposed. Returns `self` on completion.
+
+```python
+from fastogb import smallest_absolute_weight
+
+model.fit(data, target)
+model.update_weights(data, target)
+model.fit(data, target, replacement_selector=smallest_absolute_weight)
+model.fit_initial_rules(data, target)
+```
+
+External `RuleEnsembleCollection` objects cache member descriptors and coefficients. Call `refresh()` after any
+member update, or `set_members(models)` after replacing estimator objects returned by parallel training.
 
 ### `decision_function(data)`
 
@@ -338,10 +432,17 @@ alias. `loss_history_` contains the corresponding unregularised empirical mean l
 for each search-and-weight-update step, and `time` is an alias. Initial data loading, initial encoding and work before
 the first iteration timer are outside these per-iteration values.
 
+These iteration histories describe the latest call; a coefficient-only update records one entry. `last_update_`
+records `operation` (`'initial'`, `'grow'`, `'continue'`, `'weights'` or `'replace'`), coefficient arrays before and
+after the operation, empirical losses, elapsed time, removed indices and the stopping reason. Replacement adds
+the removed query strings. `update_history_` accumulates successful adaptation records and is reset by initial
+fitting. A rejected or failed operation leaves the existing fitted state intact.
+
 `stopping_reason_` explains why fitting ended. `'maximum_rules'` means the requested learned-rule count was reached.
 `'component_limit'` means the structural safety cap stopped further iterations. `'no_query'` means search returned no
 candidate. `'empty_query_extent'` indicates an empty selected subgroup. `'duplicate_query_extent'` indicates an
 already represented subgroup, and `'linearly_dependent_query_extent'` indicates dependence on the active rule basis.
+`'weights_updated'` identifies a coefficient-only adaptation call.
 
 `feature_names_in_` contains the fitted column names, and `n_features_in_` contains the input column count.
 `encoder_` is the fitted `PropositionEncoder`, while `context_matrix_` is the Boolean training proposition matrix.
@@ -357,8 +458,7 @@ count used by the fitted model.
 ```python
 print(model.rules_)
 
-for iteration, (ensemble, loss, elapsed) in enumerate(
-        zip(model.history_, model.loss_history_, model.time_), start=1):
+for iteration, (ensemble, loss, elapsed) in enumerate(zip(model.history_, model.loss_history_, model.time_), start=1):
     print(f'Iteration {iteration}: loss={loss:.8g}, time={elapsed:.6f} s')
     print(ensemble)
 ```

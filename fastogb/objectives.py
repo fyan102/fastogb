@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partialmethod
 from math import inf
 
 import numpy as np
@@ -83,7 +84,8 @@ class ObjectFunction:
         raise NotImplementedError
 
     def query_extent(self, query):
-        return np.flatnonzero(np.asarray(query(self.data), dtype=bool))
+        mask = np.asarray(query(self.data), dtype=bool)
+        return np.flatnonzero(mask)
 
     def opt_weight(self, query):
         extent = self.query_extent(query)
@@ -92,7 +94,7 @@ class ObjectFunction:
         denominator = self.reg + self.h[extent].sum()
         return 0.0 if denominator <= 0 else -self.g[extent].sum() / denominator
 
-    def _reorder(self, order):
+    def reorder(self, order):
         order = np.asarray(order, dtype=np.int64)
         self.order = self.order[order]
         self.inverse_order = np.argsort(self.order)
@@ -104,7 +106,7 @@ class ObjectFunction:
         if self.context_matrix is not None:
             self.context_matrix = self.context_matrix[order]
 
-    def _candidate_sums(self, parent, attributes, indices, values, backend, parallel=None):
+    def candidate_sums(self, parent, attributes, indices, values, backend, parallel=None):
         if backend != 'cuda':
             return candidate_statistics(parent, attributes, indices, values, backend=backend, parallel=parallel)
         key = (id(attributes), id(values))
@@ -112,16 +114,21 @@ class ObjectFunction:
             self._cuda_statistics[key] = CudaCandidateStatistics(attributes, values)
         return self._cuda_statistics[key].evaluate(parent, indices)
 
-    def _prefix_exact_batch(self, parent, attributes, indices, regularisation, scale, mode, parallel):
-        return prefix_objective_batch(parent, attributes, indices, self.g, self.h, regularisation, scale, mode,
-                                      parallel)
+    def exact_prefix_batch(self, parent, attributes, indices, depth, parallel=False, *, mode):
+        """Share prefix evaluation for XGB (mode 0), MWG (mode 1) and GPE (mode 2) objectives."""
+        regularisation = self.regularisation(depth) if mode == 0 else (0.0 if mode == 1 else self.reg)
+        scale = 1.0 if mode == 1 else 2 * self.n
+        return prefix_objective_batch(parent, attributes, indices, self.g, self.h, regularisation, scale, mode, parallel)
 
     def search(self, method='greedy', verbose=False, forbidden_masks=None, **search_params):
         try:
             search_type = search_methods[method] if isinstance(method, str) else method
         except KeyError as error:
             raise ValueError(f'Unknown search method {method!r}') from error
-        context_params, algorithm_params = _split_search_params(search_params)
+        context_keys = {'categorical', 'feature_names', 'include_missing', 'max_categories', 'max_col_attr',
+                        'min_category_count', 'without'}
+        context_params = {key: value for key, value in search_params.items() if key in context_keys and key != 'without'}
+        algorithm_params = {key: value for key, value in search_params.items() if key not in context_keys and key != 'discretization'}
         if self.context_matrix is None:
             context_params.setdefault('feature_names', self.feature_names)
             encoder = self.encoder or PropositionEncoder(**context_params)
@@ -151,29 +158,28 @@ class GradientBoostingObjectiveXGB(ObjectFunction):
         if len(extent) == 0:
             return -inf
         gradient_sum = self.g[extent].sum()
-        denominator = self._regularisation(depth) + self.h[extent].sum()
+        denominator = self.regularisation(depth) + self.h[extent].sum()
         return -inf if denominator <= 0 else gradient_sum ** 2 / (2 * self.n * denominator)
 
     def bound(self, extent, depth=0):
-        return squared_prefix_bound(self.g, self.h, extent, self._regularisation(depth), 2 * self.n)
+        regularisation = self.regularisation(depth)
+        return squared_prefix_bound(self.g, self.h, extent, regularisation, 2 * self.n)
 
     def opt_weight(self, query):
         extent = self.query_extent(query)
-        denominator = self._regularisation(len(query)) + self.h[extent].sum()
+        denominator = self.regularisation(len(query)) + self.h[extent].sum()
         return 0.0 if not len(extent) or denominator <= 0 else -self.g[extent].sum() / denominator
 
     def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
-        _, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
-        _, hessian_sums = self._candidate_sums(parent, attributes, indices, self.h, backend, parallel)
-        denominator = self._regularisation(depth) + hessian_sums
+        _, gradient_sums = self.candidate_sums(parent, attributes, indices, self.g, backend, parallel)
+        _, hessian_sums = self.candidate_sums(parent, attributes, indices, self.h, backend, parallel)
+        denominator = self.regularisation(depth) + hessian_sums
         return np.divide(np.square(gradient_sums), 2 * self.n * denominator,
                          out=np.full(len(indices), -inf), where=denominator > 0)
 
-    def exact_batch(self, parent, attributes, indices, depth, parallel=False):
-        regularisation = self._regularisation(depth)
-        return self._prefix_exact_batch(parent, attributes, indices, regularisation, 2 * self.n, 0, parallel)
+    exact_batch = partialmethod(ObjectFunction.exact_prefix_batch, mode=0)
 
-    def _regularisation(self, depth):
+    def regularisation(self, depth):
         return self.reg * (depth + 1) if self.length_regularisation else self.reg
 
 
@@ -182,7 +188,7 @@ class GradientBoostingObjectiveMWG(ObjectFunction):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._reorder(np.argsort(self.g, kind='stable')[::-1])
+        self.reorder(np.argsort(self.g, kind='stable')[::-1])
         self.h = np.ones_like(self.g)
 
     def __call__(self, extent):
@@ -195,11 +201,10 @@ class GradientBoostingObjectiveMWG(ObjectFunction):
         return float(max(np.abs(np.cumsum(gradient)).max(), np.abs(np.cumsum(gradient[::-1])).max()))
 
     def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
-        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
+        supports, gradient_sums = self.candidate_sums(parent, attributes, indices, self.g, backend, parallel)
         return np.where(supports > 0, np.abs(gradient_sums), -inf)
 
-    def exact_batch(self, parent, attributes, indices, depth, parallel=False):
-        return self._prefix_exact_batch(parent, attributes, indices, 0.0, 1.0, 1, parallel)
+    exact_batch = partialmethod(ObjectFunction.exact_prefix_batch, mode=1)
 
 
 class GradientBoostingObjectiveGPE(ObjectFunction):
@@ -207,7 +212,7 @@ class GradientBoostingObjectiveGPE(ObjectFunction):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._reorder(np.argsort(self.g, kind='stable')[::-1])
+        self.reorder(np.argsort(self.g, kind='stable')[::-1])
         self.h = np.ones_like(self.g)
 
     def __call__(self, extent):
@@ -219,13 +224,12 @@ class GradientBoostingObjectiveGPE(ObjectFunction):
         return absolute_prefix_bound(self.g, extent, self.reg, 2 * self.n)
 
     def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
-        supports, gradient_sums = self._candidate_sums(parent, attributes, indices, self.g, backend, parallel)
+        supports, gradient_sums = self.candidate_sums(parent, attributes, indices, self.g, backend, parallel)
         denominator = 2 * self.n * np.sqrt(supports + self.reg)
         return np.divide(np.abs(gradient_sums), denominator, out=np.full(len(indices), -inf),
                          where=supports > 0)
 
-    def exact_batch(self, parent, attributes, indices, depth, parallel=False):
-        return self._prefix_exact_batch(parent, attributes, indices, self.reg, 2 * self.n, 2, parallel)
+    exact_batch = partialmethod(ObjectFunction.exact_prefix_batch, mode=2)
 
 
 class OrthogonalBoostingObjective(ObjectFunction):
@@ -244,14 +248,14 @@ class OrthogonalBoostingObjective(ObjectFunction):
     def __call__(self, extent, depth=0):
         if self.maximum_query_length is not None and depth > self.maximum_query_length:
             return -inf
-        return self._value(extent, self._regularisation(depth))
+        return self.value(extent, self.regularisation(depth))
 
     def bound(self, extent, depth=0):
         if self.maximum_query_length is not None and depth > self.maximum_query_length:
             return -inf
-        return self._safe_bound(extent, self._regularisation(depth))
+        return self.safe_bound(extent, self.regularisation(depth))
 
-    def _value(self, extent, regularisation):
+    def value(self, extent, regularisation):
         if len(extent) == 0:
             return -inf
         norm = orthogonal_binary_norm(self.orth_basis, extent, regularisation)
@@ -259,7 +263,7 @@ class OrthogonalBoostingObjective(ObjectFunction):
             return -inf
         return abs(self.projected_gradient[extent].sum()) / (norm + self.epsilon)
 
-    def _safe_bound(self, extent, regularisation):
+    def safe_bound(self, extent, regularisation):
         if len(extent) == 0:
             return -inf
         lower_denominator = np.sqrt(regularisation) + self.epsilon
@@ -268,14 +272,14 @@ class OrthogonalBoostingObjective(ObjectFunction):
 
     def prefix_values(self, order, depth=0):
         """Evaluate all ordered prefixes using Yang Algorithm 3."""
-        regularisation = self._regularisation(depth)
+        regularisation = self.regularisation(depth)
         return orthogonal_prefix_values(self.projected_gradient, self.orth_basis, order, self.epsilon,
                                         regularisation)
 
     def greedy_values(self, parent, attributes, indices, depth, backend, parallel=None):
         if self.maximum_query_length is not None and depth > self.maximum_query_length:
             return np.full(len(indices), -inf, dtype=np.float64)
-        regularisation = self._regularisation(depth)
+        regularisation = self.regularisation(depth)
         return orthogonal_greedy_values(parent, attributes, indices, self.projected_gradient, self.orth_basis,
                                         regularisation, self.epsilon, parallel)
 
@@ -284,20 +288,9 @@ class OrthogonalBoostingObjective(ObjectFunction):
             children = np.bitwise_and(attributes[indices], parent)
             invalid = np.full(len(indices), -inf, dtype=np.float64)
             return children, invalid, invalid.copy()
-        regularisation = self._regularisation(depth)
+        regularisation = self.regularisation(depth)
         return orthogonal_objective_batch(parent, attributes, indices, self.projected_gradient, self.orth_basis,
                                           regularisation, self.epsilon, self.projected_gradient_norm, parallel)
 
-    def _regularisation(self, depth):
+    def regularisation(self, depth):
         return self.reg * (depth + 1) if self.length_regularisation else 0.0
-
-
-def _split_search_params(params):
-    context_keys = {
-        'categorical', 'feature_names', 'include_missing', 'max_categories', 'max_col_attr',
-        'min_category_count', 'without',
-    }
-    context = {key: value for key, value in params.items() if key in context_keys}
-    algorithm = {key: value for key, value in params.items() if key not in context_keys and key != 'discretization'}
-    context.pop('without', None)
-    return context, algorithm

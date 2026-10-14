@@ -5,13 +5,15 @@ from __future__ import annotations
 import numpy as np
 from numba import float64, int64, njit, prange
 
+from fastogb.kernels import numba_available as numba_available
+
 try:
     from numba import cuda
 except (ImportError, SystemError):
     cuda = None
 
 
-def _candidate_statistics_kernel(parent, attributes, indices, values):
+def candidate_statistics_kernel(parent, attributes, indices, values):
     supports = np.zeros(len(indices), dtype=np.int64)
     sums = np.zeros(len(indices), dtype=np.float64)
     for output_index in prange(len(indices)):
@@ -27,12 +29,12 @@ def _candidate_statistics_kernel(parent, attributes, indices, values):
     return supports, sums
 
 
-_compiled_statistics = njit(cache=True, nogil=True)(_candidate_statistics_kernel)
-_compiled_parallel_statistics = njit(cache=True, nogil=True, parallel=True)(_candidate_statistics_kernel)
+_compiled_statistics = njit(cache=True, nogil=True)(candidate_statistics_kernel)
+_compiled_parallel_statistics = njit(cache=True, nogil=True, parallel=True)(candidate_statistics_kernel)
 
 if cuda is not None:
     @cuda.jit
-    def _cuda_statistics_kernel(parent, attributes, indices, values, supports, sums):
+    def cuda_statistics_kernel(parent, attributes, indices, values, supports, sums):
         output_index = cuda.blockIdx.x
         if output_index >= len(indices):
             return
@@ -63,7 +65,7 @@ if cuda is not None:
 
 def candidate_statistics(parent, attributes, indices, values, backend='auto', parallel=None):
     """Compute support and value sums for candidate intersections."""
-    parent, attributes, indices, values = _normalise_inputs(parent, attributes, indices, values)
+    parent, attributes, indices, values = normalise_inputs(parent, attributes, indices, values)
     if backend == 'cuda':
         return CudaCandidateStatistics(attributes, values).evaluate(parent, indices)
     if backend not in {'auto', 'numba'}:
@@ -99,7 +101,7 @@ class CudaCandidateStatistics:
         sums = cuda.device_array(len(indices), dtype=np.float64)
         threads = 256
         if len(indices):
-            _cuda_statistics_kernel[len(indices), threads](device_parent, self.attributes, device_indices,
+            cuda_statistics_kernel[len(indices), threads](device_parent, self.attributes, device_indices,
                                                            self.values, supports, sums)
         return supports.copy_to_host(), sums.copy_to_host()
 
@@ -113,11 +115,7 @@ def cuda_available():
         return False
 
 
-def numba_available():
-    return True
-
-
-def _normalise_inputs(parent, attributes, indices, values):
+def normalise_inputs(parent, attributes, indices, values):
     parent = np.ascontiguousarray(parent, dtype=np.bool_)
     attributes = np.ascontiguousarray(attributes, dtype=np.bool_)
     indices = np.ascontiguousarray(indices, dtype=np.int64)

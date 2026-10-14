@@ -6,8 +6,9 @@ from fastogb.encoding import PropositionEncoder
 from fastogb.estimators import GeneralRuleBoostingEstimator
 from fastogb.logic import Conjunction, Constraint, KeyValueProposition
 from fastogb.losses import LogisticLoss, PoissonLoss, SquaredLoss, loss_function
-from fastogb.objectives import (GradientBoostingObjectiveGPE, GradientBoostingObjectiveMWG,
-                                    GradientBoostingObjectiveXGB, OrthogonalBoostingObjective)
+from fastogb.objectives import (GradientBoostingObjectiveGPE, GradientBoostingObjectiveMWG, GradientBoostingObjectiveXGB,
+                               OrthogonalBoostingObjective)
+from fastogb.replacement import no_replacement, smallest_absolute_weight
 from fastogb.rules import AdditiveRuleEnsemble, Rule
 from fastogb.search import Context, CoreQueryTreeSearch, GreedySearch, OrthogonalBeamSearch
 from fastogb.terms import LinearTerm
@@ -17,4 +18,5 @@ __all__ = ['AdditiveRuleEnsemble', 'Conjunction', 'Constraint', 'Context', 'Core
            'GeneralRuleBoostingEstimator', 'GradientBoostingObjectiveGPE', 'GradientBoostingObjectiveMWG',
            'GradientBoostingObjectiveXGB', 'GreedySearch', 'KeepWeight', 'KeyValueProposition', 'LineSearch',
            'LinearTerm', 'LogisticLoss', 'OrthogonalBeamSearch', 'OrthogonalBoostingObjective', 'PoissonLoss',
-           'PropositionEncoder', 'Rule', 'RuleEnsembleCollection', 'SquaredLoss', 'load_csv', 'loss_function']
+           'PropositionEncoder', 'Rule', 'RuleEnsembleCollection', 'SquaredLoss', 'load_csv', 'loss_function',
+           'no_replacement', 'smallest_absolute_weight']

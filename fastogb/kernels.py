@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from functools import partial
 from math import exp, inf, sqrt
 
 import numpy as np
 from numba import njit, prange
 
 
-def _compile(function, parallel=False):
-    return njit(cache=True, nogil=True, parallel=parallel)(function)
+compile_kernel = partial(njit, cache=True, nogil=True)
 
 
-def _orthogonal_prefix_values(projected_gradient, basis, order, epsilon, regularisation):
+def orthogonal_prefix_values_kernel(projected_gradient, basis, order, epsilon, regularisation):
     values = np.full(len(order), -inf, dtype=np.float64)
     projection = np.zeros(basis.shape[1], dtype=np.float64)
     gradient_sum = 0.0
@@ -35,7 +35,7 @@ def _orthogonal_prefix_values(projected_gradient, basis, order, epsilon, regular
     return values
 
 
-def _orthogonal_extent_norm(basis, extent, regularisation):
+def orthogonal_extent_norm_kernel(basis, extent, regularisation):
     projection = np.zeros(basis.shape[1], dtype=np.float64)
     for position in range(len(extent)):
         row = extent[position]
@@ -52,7 +52,7 @@ def _orthogonal_extent_norm(basis, extent, regularisation):
     return sqrt((residual if residual > tolerance else 0.0) + regularisation)
 
 
-def _squared_prefix_bound(gradient, hessian, extent, regularisation, scale):
+def squared_prefix_bound_kernel(gradient, hessian, extent, regularisation, scale):
     if len(extent) == 0:
         return -inf
     forward_gradient = 0.0
@@ -74,7 +74,7 @@ def _squared_prefix_bound(gradient, hessian, extent, regularisation, scale):
     return best / scale
 
 
-def _absolute_prefix_bound(gradient, extent, regularisation, scale):
+def absolute_prefix_bound_kernel(gradient, extent, regularisation, scale):
     if len(extent) == 0:
         return -inf
     forward_gradient = 0.0
@@ -88,7 +88,7 @@ def _absolute_prefix_bound(gradient, extent, regularisation, scale):
     return best / scale
 
 
-def _mask_intersection_extent(left, right):
+def mask_intersection_extent_kernel(left, right):
     mask = np.empty(len(left), dtype=np.bool_)
     count = 0
     for index in range(len(left)):
@@ -104,14 +104,14 @@ def _mask_intersection_extent(left, right):
     return mask, extent
 
 
-def _is_subset(left, right):
+def is_subset_kernel(left, right):
     for index in range(len(left)):
         if left[index] and not right[index]:
             return False
     return True
 
 
-def _pack_masks(masks):
+def pack_masks_kernel(masks):
     word_count = (masks.shape[1] + 63) // 64
     packed = np.zeros((masks.shape[0], word_count), dtype=np.uint64)
     one = np.uint64(1)
@@ -122,7 +122,7 @@ def _pack_masks(masks):
     return packed
 
 
-def _packed_intersection_extent(left, right, row_count):
+def packed_intersection_extent_kernel(left, right, row_count):
     packed = np.empty(len(left), dtype=np.uint64)
     count = 0
     one = np.uint64(1)
@@ -150,14 +150,14 @@ def _packed_intersection_extent(left, right, row_count):
     return packed, extent[:position]
 
 
-def _packed_is_subset(left, right):
+def packed_is_subset_kernel(left, right):
     for word in range(len(left)):
         if left[word] & ~right[word]:
             return False
     return True
 
 
-def _packed_to_extent(packed, row_count):
+def packed_to_extent_kernel(packed, row_count):
     count = 0
     one = np.uint64(1)
     for word in packed:
@@ -173,7 +173,7 @@ def _packed_to_extent(packed, row_count):
     return extent
 
 
-def _prefix_objective_batch(parent, attributes, indices, gradient, hessian, regularisation, scale, mode):
+def prefix_objective_batch_kernel(parent, attributes, indices, gradient, hessian, regularisation, scale, mode):
     children = np.empty((len(indices), len(parent)), dtype=np.uint64)
     values = np.full(len(indices), -inf, dtype=np.float64)
     bounds = np.full(len(indices), -inf, dtype=np.float64)
@@ -230,7 +230,7 @@ def _prefix_objective_batch(parent, attributes, indices, gradient, hessian, regu
     return children, values, bounds
 
 
-def _orthogonal_objective_batch(parent, attributes, indices, gradient, basis, regularisation, epsilon,
+def orthogonal_objective_batch_kernel(parent, attributes, indices, gradient, basis, regularisation, epsilon,
                                 gradient_norm):
     children = np.empty((len(indices), len(parent)), dtype=np.uint64)
     values = np.full(len(indices), -inf, dtype=np.float64)
@@ -269,7 +269,7 @@ def _orthogonal_objective_batch(parent, attributes, indices, gradient, basis, re
     return children, values, bounds
 
 
-def _orthogonal_greedy_values(parent, attributes, indices, gradient, basis, regularisation, epsilon):
+def orthogonal_greedy_values_kernel(parent, attributes, indices, gradient, basis, regularisation, epsilon):
     values = np.full(len(indices), -inf, dtype=np.float64)
     for output in prange(len(indices)):
         attribute = indices[output]
@@ -296,7 +296,7 @@ def _orthogonal_greedy_values(parent, attributes, indices, gradient, basis, regu
     return values
 
 
-def _find_small_packed_critical_index(gen_index, extension, closure, attributes):
+def find_small_packed_critical_index_kernel(gen_index, extension, closure, attributes):
     for attribute in range(gen_index):
         if closure[attribute]:
             continue
@@ -310,7 +310,7 @@ def _find_small_packed_critical_index(gen_index, extension, closure, attributes)
     return len(closure)
 
 
-def _complete_packed_closure(gen_index, extension, closure, attributes):
+def complete_packed_closure_kernel(gen_index, extension, closure, attributes):
     critical_index = len(closure)
     for attribute in range(gen_index + 1, len(closure)):
         if closure[attribute]:
@@ -326,7 +326,7 @@ def _complete_packed_closure(gen_index, extension, closure, attributes):
     return critical_index
 
 
-def _proposition_matrix(values, columns, operations, operands):
+def proposition_matrix_kernel(values, columns, operations, operands):
     matrix = np.empty((values.shape[0], len(columns)), dtype=np.bool_)
     for proposition in prange(len(columns)):
         column = columns[proposition]
@@ -351,7 +351,7 @@ def _proposition_matrix(values, columns, operations, operands):
     return matrix
 
 
-def _rule_ensemble_scores(context, offsets, proposition_indices, positive, negative):
+def rule_ensemble_scores_kernel(context, offsets, proposition_indices, positive, negative):
     scores = np.zeros(context.shape[0], dtype=np.float64)
     for row in prange(context.shape[0]):
         total = 0.0
@@ -366,7 +366,7 @@ def _rule_ensemble_scores(context, offsets, proposition_indices, positive, negat
     return scores
 
 
-def _loss_derivatives(target, scores, loss_code):
+def loss_derivatives_kernel(target, scores, loss_code):
     gradient = np.empty(len(target), dtype=np.float64)
     hessian = np.empty(len(target), dtype=np.float64)
     for row in prange(len(target)):
@@ -391,30 +391,30 @@ def _loss_derivatives(target, scores, loss_code):
     return gradient, hessian
 
 
-_compiled_orthogonal_prefix_values = _compile(_orthogonal_prefix_values)
-_compiled_orthogonal_extent_norm = _compile(_orthogonal_extent_norm)
-_compiled_squared_prefix_bound = _compile(_squared_prefix_bound)
-_compiled_absolute_prefix_bound = _compile(_absolute_prefix_bound)
-_compiled_mask_intersection_extent = _compile(_mask_intersection_extent)
-_compiled_is_subset = _compile(_is_subset)
-_compiled_pack_masks = _compile(_pack_masks, parallel=True)
-_compiled_packed_intersection_extent = _compile(_packed_intersection_extent)
-_compiled_packed_is_subset = _compile(_packed_is_subset)
-_compiled_packed_to_extent = _compile(_packed_to_extent)
-_compiled_prefix_objective_batch = _compile(_prefix_objective_batch)
-_compiled_parallel_prefix_objective_batch = _compile(_prefix_objective_batch, parallel=True)
-_compiled_orthogonal_objective_batch = _compile(_orthogonal_objective_batch)
-_compiled_parallel_orthogonal_objective_batch = _compile(_orthogonal_objective_batch, parallel=True)
-_compiled_orthogonal_greedy_values = _compile(_orthogonal_greedy_values)
-_compiled_parallel_orthogonal_greedy_values = _compile(_orthogonal_greedy_values, parallel=True)
-_compiled_find_small_packed_critical_index = _compile(_find_small_packed_critical_index)
-_compiled_complete_packed_closure = _compile(_complete_packed_closure)
-_compiled_proposition_matrix = _compile(_proposition_matrix)
-_compiled_parallel_proposition_matrix = _compile(_proposition_matrix, parallel=True)
-_compiled_rule_ensemble_scores = _compile(_rule_ensemble_scores)
-_compiled_parallel_rule_ensemble_scores = _compile(_rule_ensemble_scores, parallel=True)
-_compiled_loss_derivatives = _compile(_loss_derivatives)
-_compiled_parallel_loss_derivatives = _compile(_loss_derivatives, parallel=True)
+_compiled_orthogonal_prefix_values = compile_kernel(orthogonal_prefix_values_kernel)
+_compiled_orthogonal_extent_norm = compile_kernel(orthogonal_extent_norm_kernel)
+_compiled_squared_prefix_bound = compile_kernel(squared_prefix_bound_kernel)
+_compiled_absolute_prefix_bound = compile_kernel(absolute_prefix_bound_kernel)
+_compiled_mask_intersection_extent = compile_kernel(mask_intersection_extent_kernel)
+_compiled_is_subset = compile_kernel(is_subset_kernel)
+_compiled_pack_masks = compile_kernel(pack_masks_kernel, parallel=True)
+_compiled_packed_intersection_extent = compile_kernel(packed_intersection_extent_kernel)
+_compiled_packed_is_subset = compile_kernel(packed_is_subset_kernel)
+_compiled_packed_to_extent = compile_kernel(packed_to_extent_kernel)
+_compiled_prefix_objective_batch = compile_kernel(prefix_objective_batch_kernel)
+_compiled_parallel_prefix_objective_batch = compile_kernel(prefix_objective_batch_kernel, parallel=True)
+_compiled_orthogonal_objective_batch = compile_kernel(orthogonal_objective_batch_kernel)
+_compiled_parallel_orthogonal_objective_batch = compile_kernel(orthogonal_objective_batch_kernel, parallel=True)
+_compiled_orthogonal_greedy_values = compile_kernel(orthogonal_greedy_values_kernel)
+_compiled_parallel_orthogonal_greedy_values = compile_kernel(orthogonal_greedy_values_kernel, parallel=True)
+_compiled_find_small_packed_critical_index = compile_kernel(find_small_packed_critical_index_kernel)
+_compiled_complete_packed_closure = compile_kernel(complete_packed_closure_kernel)
+_compiled_proposition_matrix = compile_kernel(proposition_matrix_kernel)
+_compiled_parallel_proposition_matrix = compile_kernel(proposition_matrix_kernel, parallel=True)
+_compiled_rule_ensemble_scores = compile_kernel(rule_ensemble_scores_kernel)
+_compiled_parallel_rule_ensemble_scores = compile_kernel(rule_ensemble_scores_kernel, parallel=True)
+_compiled_loss_derivatives = compile_kernel(loss_derivatives_kernel)
+_compiled_parallel_loss_derivatives = compile_kernel(loss_derivatives_kernel, parallel=True)
 
 
 def orthogonal_prefix_values(projected_gradient, basis, order, epsilon, regularisation=0.0):

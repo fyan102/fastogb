@@ -8,6 +8,9 @@ from scipy.linalg import qr
 from fastogb.kernels import orthogonal_extent_norm
 
 
+orthogonal_binary_norm = orthogonal_extent_norm
+
+
 class OrthogonalBasis:
     """Incrementally maintain an orthonormal basis with dependence detection."""
 
@@ -23,7 +26,7 @@ class OrthogonalBasis:
         if not np.all(np.isfinite(vector)):
             raise ValueError('Basis candidate contains NaN or infinite values')
         scale = np.linalg.norm(vector)
-        tolerance = self._tolerance(scale)
+        tolerance = self.tolerance(scale)
         if scale <= tolerance:
             return False
         residual = project_away(self.values, vector)
@@ -46,11 +49,11 @@ class OrthogonalBasis:
         basis, triangular, pivots = qr(matrix, mode='economic', pivoting=True)
         diagonal = np.abs(np.diag(triangular))
         scale = diagonal[0] if len(diagonal) else 0.0
-        rank = int(np.count_nonzero(diagonal > self._tolerance(scale)))
+        rank = int(np.count_nonzero(diagonal > self.tolerance(scale)))
         self.values = basis[:, :rank]
         return np.sort(np.asarray(pivots[:rank], dtype=np.int64))
 
-    def _tolerance(self, scale):
+    def tolerance(self, scale):
         if self.rtol is not None:
             return float(self.rtol) * max(float(scale), 1.0)
         return np.sqrt(32 * np.finfo(np.float64).eps) * max(float(scale), 1.0)
@@ -73,10 +76,6 @@ def orthonormalize(matrix, rtol=None):
     return basis.values
 
 
-def orthogonal_binary_norm(basis, extent, regularisation=0.0):
-    return orthogonal_extent_norm(basis, extent, regularisation)
-
-
 def orthogonal_binary_prefix_norms(basis, extent, regularisation=0.0):
     basis = np.asarray(basis, dtype=np.float64)
     extent = np.asarray(extent, dtype=np.int64)
@@ -85,10 +84,10 @@ def orthogonal_binary_prefix_norms(basis, extent, regularisation=0.0):
         return np.sqrt(lengths + regularisation)
     projections = np.cumsum(basis[extent], axis=0)
     projection_norms = np.einsum('ij,ij->i', projections, projections)
-    return np.sqrt(_safe_residual_squared(lengths, projection_norms) + regularisation)
+    return np.sqrt(safe_residual_squared(lengths, projection_norms) + regularisation)
 
 
-def _safe_residual_squared(total_norm, projection_norm):
+def safe_residual_squared(total_norm, projection_norm):
     total_norm = np.asarray(total_norm, dtype=np.float64)
     projection_norm = np.asarray(projection_norm, dtype=np.float64)
     residual = total_norm - projection_norm
