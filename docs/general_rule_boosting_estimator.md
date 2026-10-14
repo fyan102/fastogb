@@ -1,8 +1,6 @@
 # GeneralRuleBoostingEstimator interface
 
-`GeneralRuleBoostingEstimator` is the single user-facing estimator for constructing additive rule ensembles. Its
-behaviour is configured by composing a query-selection objective, a search method, a loss and a weight-update method.
-Install the `fastogb` distribution from PyPI with `pip install fastogb`, then import its public API from `fastogb`.
+`GeneralRuleBoostingEstimator` is the single user-facing estimator for constructing additive rule ensembles. Its behaviour is configured by composing a query-selection objective, a search method, a loss and a weight-update method. Install the `fastogb` distribution from PyPI with `pip install fastogb`, then import its public API from `fastogb`. This document combines constructor and method contracts with task-based examples for initial training, adapting coefficients, replacing rules, choosing search algorithms and evaluating collections. The adaptation examples describe the 0.2.0 interface, so ensure that your installed version provides these methods before using them. Input matrices use NumPy-compatible values and positional feature alignment; categorical encoding and readable feature names are handled through the documented encoding configuration.
 
 ## Constructor
 
@@ -235,6 +233,261 @@ model = GeneralRuleBoostingEstimator(num_rules=10, objective_function=Orthogonal
 model.fit(data, target)
 ```
 
+## Task-based examples
+
+### Shared setup
+
+The examples in this section use a small numerical regression dataset so they do not require pandas or external data files. `data` has shape `(12, 2)` and `target` has shape `(12,)`; the update batch uses the same feature matrix with changed responses. For real observations, use the arrays, feature names and categorical configuration returned by `load_csv` instead of the example's feature configuration, preserving column alignment in subsequent batches. Run this setup before each independent task unless the task explicitly continues the preceding example. It creates a fresh model with a default rule and a budget of two learned conjunctions. Search may stop below that budget when no admissible independent query remains. These examples have been reviewed against the implementation but have not been executed.
+
+```python
+import numpy as np
+from fastogb import (Conjunction, FullyCorrective, GeneralRuleBoostingEstimator, GradientBoostingObjectiveXGB,
+                     OrthogonalBoostingObjective, RuleEnsembleCollection, loss_function, no_replacement, smallest_absolute_weight)
+
+data = np.column_stack((np.arange(12.0), np.tile([0.0, 1.0], 6)))
+target = np.where(data[:, 0] < 6, -1.0, 1.0) + 0.5 * data[:, 1]
+new_data = data.copy()
+new_target = 1.3 * target + 0.2
+settings = {'num_rules': 2, 'objective_function': OrthogonalBoostingObjective, 'loss': 'squared', 'reg': 0.1,
+            'weight_update_method': FullyCorrective(learning_rate=0.1), 'include_default_rule': True, 'search': 'greedy',
+            'n_jobs': 1, 'search_params': {'feature_names': ['measurement', 'enabled']}, 'objective_params': {'epsilon': 1e-4}}
+model = GeneralRuleBoostingEstimator(**settings)
+model.fit(data, target)
+```
+
+### Updating coefficients with a learning rate
+
+`update_weights` recalculates coefficients while retaining every query, so it is the explicit operation for adapting a fixed model structure to new observations. The setup configures `FullyCorrective(learning_rate=0.1)`: initial fitting uses a copied updater with rate one, and this subsequent call uses rate 0.1. Each active coefficient moves from its current value towards the proposed optimum according to `previous + 0.1 * (proposed - previous)`. The default coefficient remains fixed with `fixed_prefix=None`; set `fixed_prefix=0` on the configured updater if it should also adapt. `LineSearch` changes only the last unprotected coefficient, while `KeepWeight` changes none and ignores its learning-rate setting. Change the configured `weight_update_method` for future operations; editing the fitted `weight_update_method_` copy does not configure the next call.
+
+```python
+previous_weights = np.asarray([rule.y for rule in model.rules_])
+model.update_weights(new_data, new_target)
+updated_weights = np.asarray([rule.y for rule in model.rules_])
+print('Previous weights:', previous_weights)
+print('Updated weights:', updated_weights)
+print('Empirical loss before and after:', model.last_update_['loss_before'], model.last_update_['loss_after'])
+```
+
+To change the learning rate, solver or fixed prefix, replace the configured updater and then request another coefficient update. Built-in updaters do not implement nested `set_params`, so use the top-level assignment below rather than `weight_update_method__learning_rate`. The estimator supplies its own loss and regularisation to the copied updater at the next operation, avoiding duplicated configuration. Passing `fixed_prefix=0` allows the default coefficient and all other coefficients to participate in fully corrective optimisation; it does not make the default query eligible for replacement. The solver setting controls logistic and Poisson optimisation, while squared loss uses a linear-system solution. The interpolation rate applies on every coefficient calculation, so growing or replacing several rules can perform several damped steps within one call.
+
+```python
+model.set_params(weight_update_method=FullyCorrective(learning_rate=0.25, fixed_prefix=0, solver='BFGS'))
+model.update_weights(new_data, new_target)
+```
+
+### Replacing rules and defining criteria
+
+For a direct replacement request, call `replace_rules` with a selector such as `smallest_absolute_weight`. It selects one learned conjunction, removes it, and searches for replacement rules to restore at least the previous learned-rule count and the configured `num_rules`. It can select a rule even when the model is below its budget; in that case regrowth still targets the larger count. If search cannot restore that count, the call raises `RuntimeError` and restores the pre-replacement state. A selector passed to `fit` is consulted only when the budget has already been reached; initial fitting and undersized growth do not call it. The examples below are alternative entry points for the same built-in criterion, and a removed query can be rediscovered because replacement imposes no novelty requirement.
+
+```python
+model.replace_rules(new_data, new_target, replacement_selector=smallest_absolute_weight)
+print('Removed indices:', model.last_update_['removed_indices'])
+print(model.rules_)
+```
+
+```python
+model.fit(new_data, new_target, replacement_selector=smallest_absolute_weight)
+```
+
+A custom selector must accept the ensemble snapshot and return a Python list of unique indices into that full snapshot. Base terms occupy the initial positions and cannot be selected, so indices must not be renumbered relative to a slice of learned rules. The snapshot includes `_base_rule_count_`, which the built-in selector also uses to identify the protected prefix. The following criterion selects up to two learned conjunctions by absolute weight, with ties retaining ensemble order. It accepts an optional `count`, while the estimator supplies only the ensemble argument and therefore uses the default count. To replace all eligible rules, the alternative uses `partial` to bind `count=None`, which retains the full sorted list. Base terms remain protected, and all-rule replacement still uses the adaptation learning rate. Treat the snapshot as read-only.
+
+```python
+def smallest_weights(ensemble, count=2):
+    base_count = ensemble._base_rule_count_
+    eligible = [i for i, rule in enumerate(ensemble) if i >= base_count and isinstance(rule.q, Conjunction)]
+    return sorted(eligible, key=lambda i: abs(ensemble[i].y))[:count]
+
+model.replace_rules(new_data, new_target, replacement_selector=smallest_weights)
+```
+
+```python
+from functools import partial
+
+model.replace_rules(new_data, new_target, replacement_selector=partial(smallest_weights, count=None))
+```
+
+Replacement can also be conditional, as shown by the weight threshold below. This callback reuses the built-in selector to retain its base-term protection, then decides whether the selected rule should actually be removed. An empty list prevents structural replacement and requests the ordinary coefficient update instead; `replace_rules` with its default `no_replacement` selector has that same meaning. Automatic `fit` also uses this default once its learned-rule budget has been reached. Consequently, keeping the rule structure does not necessarily keep its coefficients unchanged. Use `KeepWeight` when that is the intended coefficient policy, and distinguish that choice from returning an empty structural selection. Booleans, negative indices, duplicates, out-of-range indices, protected terms and `None` are invalid selector results.
+
+```python
+def replace_weakest_below_threshold(ensemble):
+    indices = smallest_absolute_weight(ensemble)
+    return indices if indices and abs(ensemble[indices[0]].y) < 0.05 else []
+
+model.replace_rules(new_data, new_target, replacement_selector=replace_weakest_below_threshold)
+```
+
+```python
+model.fit(new_data, new_target, replacement_selector=no_replacement)
+```
+
+### Selecting by empirical or regularised removal risk
+
+A selector can capture data, targets and a loss function while retaining the required one-ensemble input interface. The example below measures the change in risk when each eligible rule is removed while all surviving coefficients stay unchanged, then selects the least damaging removal if its risk increase is within a chosen tolerance. Execute the `smallest_weights` definition above before this example; requesting `count=None` returns all eligible indices for evaluation. The captured targets are flattened to avoid broadcasting a single-column response array against one-dimensional scores. The loss receives raw additive scores, including for logistic and Poisson losses. This selection calculation describes deletion at the current coefficients; the subsequent replacement search and coefficient updates can produce a different final risk, and the estimator performs no separate final-risk acceptance test.
+
+```python
+criterion_loss = loss_function(model.loss)
+include_regularisation = True
+maximum_removal_increase = 0.01
+
+def select_by_removal_risk(ensemble):
+    eligible = smallest_weights(ensemble, count=None)
+    if not eligible:
+        return []
+    response = np.asarray(new_target, dtype=np.float64).reshape(-1)
+    scores = ensemble(new_data)
+    weights = np.asarray([rule.y for rule in ensemble])
+    penalty_strength = model.reg if include_regularisation else 0.0
+    total_squared_weight = np.dot(weights, weights)
+    baseline = float(np.mean(criterion_loss(response, scores))) + penalty_strength * total_squared_weight / (2 * len(response))
+    changes = []
+    for index in eligible:
+        reduced_scores = scores - ensemble[index](new_data)
+        reduced_risk = float(np.mean(criterion_loss(response, reduced_scores)))
+        reduced_risk += penalty_strength * (total_squared_weight - weights[index] ** 2) / (2 * len(response))
+        changes.append((reduced_risk - baseline, index))
+    increase, index = min(changes)
+    return [index] if increase <= maximum_removal_increase else []
+
+model.replace_rules(new_data, new_target, replacement_selector=select_by_removal_risk)
+```
+
+Set `include_regularisation=False` to select using empirical mean loss alone, or leave it true to include the displayed L2 penalty. This example deliberately penalises every `rule.y` coefficient as part of the selector's criterion. Protected base terms remain present in both compared ensembles, so their unchanged penalty cancels; a selector intended to reproduce a particular updater's treatment of other fixed coefficients must use that updater's active prefix. The factor `1 / (2 * n_samples)` expresses the penalty on the same mean-loss scale as a summed loss plus `reg * squared_weight / 2`. No coefficient optimisation precedes this criterion. If recalculated coefficients should determine eligibility, the alternative below computes fully corrective proposals solely for selection and leaves the snapshot and fitted model unchanged until replacement begins.
+
+```python
+def select_by_recalculated_weight(ensemble):
+    updater = FullyCorrective(loss=model.loss, reg=model.reg, fixed_prefix=model.weight_update_method_.fixed_prefix)
+    response = np.asarray(new_target, dtype=np.float64).reshape(-1)
+    proposed = updater.calc_weight(new_data, response, ensemble)
+    eligible = smallest_weights(ensemble, count=None)
+    return sorted(eligible, key=lambda i: abs(proposed[i]))[:1]
+
+model.replace_rules(new_data, new_target, replacement_selector=select_by_recalculated_weight)
+```
+
+### Growing, resetting and configuring base terms
+
+Increase `num_rules` and call ordinary `fit` to preserve the existing queries and search for additional learned rules. The automatic selector is ignored while that ensemble remains undersized, and coefficient calculations during growth honour the configured learning rate. Lowering the budget does not truncate an already larger ensemble. Replacement preserves at least its previous learned-rule count; obtaining a smaller model requires fresh fitting with the smaller budget. `fit_initial_rules` with its default operation discards previous queries, reconstructs the encoder and base terms, uses undamped initial fitting, and resets iteration and adaptation histories. These are separate tasks: run the relevant block after the shared setup rather than appending a reset to a replacement demonstration. Explicit legacy `has_origin_rules=False` is another reset entry point, while `True` retains grow-only continuation.
+
+```python
+model.set_params(num_rules=4)
+model.fit(new_data, new_target)
+print('Stopping reason:', model.stopping_reason_)
+print(model.rules_)
+```
+
+```python
+model.set_params(num_rules=1)
+model.fit_initial_rules(new_data, new_target)
+print(model.rules_)
+```
+
+Default and linear terms are configured before fresh fitting, because adaptation retains the already fitted base structure and numeric standardisation parameters. The first model below includes a default rule and permits its coefficient to adapt by selecting `fixed_prefix=0`; omitting the default rule requires `include_default_rule=False` in a fresh configuration. The second model adds standardised numeric linear terms while retaining the learned-rule budget. These base terms do not count towards `num_rules`, and their queries remain protected from replacement regardless of whether their coefficients are fixed. Fully corrective optimisation can update linear coefficients outside its fixed prefix. Numeric columns with no usable variation are skipped, and categorical linear terms use the encoder's category indicators. Changing these options on a fitted model should be followed by explicit fresh fitting when the base structure needs to change.
+
+```python
+default_model = GeneralRuleBoostingEstimator(**(settings | {'weight_update_method': FullyCorrective(learning_rate=0.1, fixed_prefix=0)}))
+default_model.fit(data, target)
+default_model.update_weights(new_data, new_target)
+
+linear_model = GeneralRuleBoostingEstimator(**(settings | {'include_linear_terms': True}))
+linear_model.fit(data, target)
+print(linear_model.rules_)
+```
+
+### Choosing losses, objectives and search methods
+
+The shared setup demonstrates squared-loss regression with an orthogonal objective, greedy search and fully corrective weights. These elements can be changed independently within their supported combinations. The classification example below constructs illustrative labels encoded as exactly `-1` and `1`, then exposes labels, raw scores and probabilities separately; real categorical target labels should be mapped during CSV loading. The Poisson example constructs non-negative counts and returns their predicted conditional means. Each new estimator performs fresh fitting, so its initial coefficient calculations ignore the configured adaptation rate. For these loss functions, risk calculations use `decision_function` scores rather than thresholded classification labels or exponentiated count predictions. The toy target transformations only illustrate the input domains and should be replaced by the actual response variables of a real application.
+
+```python
+labels = np.where(target > 0, 1.0, -1.0)
+classifier = GeneralRuleBoostingEstimator(**(settings | {'loss': 'logistic'}))
+classifier.fit(data, labels)
+predicted_labels = classifier.predict(data)
+raw_scores = classifier.decision_function(data)
+probabilities = classifier.predict_proba(data)
+
+counts = np.where(data[:, 0] < 6, 1.0, 4.0) + data[:, 1]
+count_model = GeneralRuleBoostingEstimator(**(settings | {'loss': 'poisson'}))
+count_model.fit(data, counts)
+predicted_counts = count_model.predict(data)
+```
+
+For query selection, choose an objective class and a compatible search method, then fit a fresh estimator to compare their resulting structures. The following alternatives keep the shared data and encoding options: greedy OGB, exact branch-and-bound OGB, orthogonal beam search, and greedy XGB. Exact pruning uses `apx=1.0`; the example's `max_depth=3` restricts the exact search space. Beam search requires an objective providing ordered prefix values, so it is paired with `OrthogonalBoostingObjective`. XGB, MWG and GPE can use greedy or exact search. Changing the search or objective on a model already at its rule budget does not trigger query selection during default repeated `fit`; explicitly reset, grow or replace rules when those changes should affect structure. The dictionary merges preserve feature names while adding algorithm-specific options.
+
+```python
+greedy_model = GeneralRuleBoostingEstimator(**settings)
+exact_params = settings['search_params'] | {'order': 'bestboundfirst', 'apx': 1.0, 'max_depth': 3}
+exact_model = GeneralRuleBoostingEstimator(**(settings | {'search': 'exhaustive', 'search_params': exact_params}))
+beam_params = settings['search_params'] | {'beam_width': 4, 'max_depth': 3}
+beam_model = GeneralRuleBoostingEstimator(**(settings | {'search': 'ogb', 'search_params': beam_params}))
+xgb_model = GeneralRuleBoostingEstimator(**(settings | {'objective_function': GradientBoostingObjectiveXGB, 'objective_params': {}}))
+for candidate in (greedy_model, exact_model, beam_model, xgb_model):
+    candidate.fit(data, target)
+    print(candidate.search, candidate.stopping_reason_)
+    print(candidate.rules_)
+```
+
+### Controlling feature use and parallel evaluation
+
+To exclude a variable from learned rule conditions without changing the input schema, place its name or positional index in `search_params['without']`, as shown below for the second numerical feature. The array and its feature-name sequence still contain that column, so prediction and subsequent adaptation retain the same positional schema. Categorical columns can be specified through the same search dictionary and are encoded automatically as equality indicators; use an object array when combining numerical values with category strings. The current interface has no option requiring particular variables to appear in every conjunction. Exclusion controls candidate propositions; when numeric linear terms are enabled, they can still use excluded numeric columns. Remove a column from the original data before fresh fitting when it must be absent from every model component.
+
+```python
+filtered_params = settings['search_params'] | {'without': ['enabled']}
+filtered_model = GeneralRuleBoostingEstimator(**(settings | {'search_params': filtered_params}))
+filtered_model.fit(data, target)
+```
+
+```python
+mixed_data = np.array([[18.0, 'cool'], [19.0, 'warm'], [20.0, None], [np.nan, 'cool'], [22.0, 'warm']], dtype=object)
+mixed_target = np.array([1.0, 2.0, 1.5, 0.5, 3.0])
+mixed_params = {'feature_names': ['measurement', 'mode'], 'categorical': ['mode'], 'include_missing': True}
+mixed_model = GeneralRuleBoostingEstimator(**(settings | {'search_params': mixed_params}))
+mixed_model.fit(mixed_data, mixed_target)
+print(mixed_model.rules_)
+```
+
+CPU parallelism is configured through `n_jobs`, independently of the choice of loss or coefficient learning rate. `n_jobs=-1` uses the configured Numba maximum, while explicit worker counts must remain within that limit. Large greedy and exact candidate batches use Numba workers, and orthogonal beam search can parallelise numerical threshold families. Prediction and package-native ensemble calls also select compiled parallel paths only when their workload thresholds are met; this small example may remain serial. `RuleEnsembleCollection` evaluates several models with columns corresponding to their list order, returning shape `(n_samples, n_models)`. Its fused numeric path can use CPU workers, while unsupported queries or non-numeric data may fall back to individual evaluation. The model list below continues the search-comparison example; run that example first.
+
+```python
+parallel_model = GeneralRuleBoostingEstimator(**(settings | {'n_jobs': -1}))
+parallel_model.fit(data, target)
+predictions = parallel_model.predict(new_data)
+ensemble_scores = parallel_model.rules_(new_data)
+
+models = [greedy_model, exact_model, beam_model, xgb_model]
+evaluator = RuleEnsembleCollection(models, n_jobs=-1)
+scores = evaluator.decision_function(new_data)
+print('Score matrix shape:', scores.shape)
+```
+
+### Refreshing collections and inspecting adaptation
+
+Collections cache the query descriptors and coefficients of their member ensembles. After fitting, reweighting or replacing rules in an existing member estimator, call `refresh` before evaluating the collection again; otherwise its fused path can still use the old coefficients or structures. If parallel training returns new estimator objects and the parent process installs them into the model list, call `set_members(models)` instead, after all assignments have completed. That method replaces the collection's copied member list and rebuilds its plan; calling `refresh` alone would still inspect the old estimator references. This distinction also applies to replacing list entries without multiprocessing. Each column of the score matrix remains associated with the corresponding member position, and transposing that matrix gives the action-by-observation layout used by action-selection code.
+
+```python
+models[0].update_weights(new_data, new_target)
+evaluator.refresh()
+scores = evaluator.decision_function(new_data)
+action_values = scores.T
+```
+
+```python
+replacement_model = GeneralRuleBoostingEstimator(**settings)
+replacement_model.fit(new_data, new_target)
+models[0] = replacement_model
+evaluator.set_members(models)
+scores = evaluator.decision_function(new_data)
+```
+
+For adaptation diagnostics, `last_update_` identifies the operation, records empirical loss before and after it, and reports removed indices for replacement. `update_history_` accumulates these records since the last initial fit, while `history_`, `loss_history_` and `time_` describe the latest training or adaptation call. Initial fitting clears adaptation history; a coefficient-only update records one iteration entry. The displayed losses are empirical means without the coefficient penalty, so they can differ from the regularised optimisation objective or a custom selector's criterion. Per-iteration elapsed times exclude preparation outside the timed loop, including initial encoding, and cold Numba compilation can affect observed timings. Use the code below after an adaptation example to inspect what actually happened rather than assuming that a replacement request necessarily produced a different query.
+
+```python
+print(model.last_update_['operation'], model.last_update_['removed_indices'], model.stopping_reason_)
+print(model.last_update_['loss_before'], model.last_update_['loss_after'])
+for update in model.update_history_:
+    print(update['operation'], update['removed_indices'], update['loss_after'])
+print(model.rules_)
+```
+
 ## Public methods
 
 ### `fit(data, target, has_origin_rules=None, verbose=False, *, replacement_selector=no_replacement)`
@@ -359,11 +612,10 @@ No risk-based rejection is imposed. Returns `self` on completion.
 ```python
 from fastogb import smallest_absolute_weight
 
-model.fit(data, target)
-model.update_weights(data, target)
-model.fit(data, target, replacement_selector=smallest_absolute_weight)
-model.fit_initial_rules(data, target)
+model.replace_rules(data, target, replacement_selector=smallest_absolute_weight)
 ```
+
+Task examples for automatic replacement, custom selectors and learning-rate updates appear in [Task-based examples](#task-based-examples).
 
 External `RuleEnsembleCollection` objects cache member descriptors and coefficients. Call `refresh()` after any
 member update, or `set_members(models)` after replacing estimator objects returned by parallel training.
@@ -404,14 +656,11 @@ parameter and its current value. It supports estimator inspection and parameter-
 scikit-learn naming convention. When `deep=True` and a configured child object exposes `get_params`, the result also
 contains nested keys of the form `parent__child`. When `deep=False`, only the direct constructor parameters are
 returned. This method does not require a fitted estimator and does not copy mutable parameter values.
+Built-in weight updaters do not expose `get_params`, so their individual options do not appear as nested keys.
 
 ### `set_params(**params)`
 
-`params` consists of keyword arguments whose names correspond to constructor parameters and whose values follow the
-constructor contracts documented above. Nested names of the form `parent__child` are forwarded to a configured child
-object exposing `set_params`; for example, `weight_update_method__solver='BFGS'` addresses a solver parameter on a
-compatible updater. The method returns `self`. Changing configuration does not mutate the already learned rules,
-weights, prediction plan or histories, so users must call `fit` to apply training-related changes.
+`params` consists of keyword arguments whose names correspond to constructor parameters and whose values follow the constructor contracts documented above. Nested names of the form `parent__child` require the configured child object to implement `set_params`. Built-in weight updaters do not provide that method: use `model.set_params(weight_update_method=FullyCorrective(solver='BFGS', learning_rate=0.1))` to replace their configuration. The method returns `self` without changing the fitted ensemble immediately. Call `update_weights` to apply coefficient settings to existing queries. Objective and search settings affect subsequently added queries; an ordinary `fit` on a full ensemble updates only coefficients by default, so use growth, selected replacement or `fit_initial_rules` when new query selection is required. Configure default and linear terms before fresh fitting.
 
 ### `set_reg(reg)`
 

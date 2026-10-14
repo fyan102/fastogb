@@ -16,7 +16,6 @@ methods and fitted attributes are described in the
 
 [estimator-interface]: https://github.com/fyan102/fastogb/blob/main/docs/general_rule_boosting_estimator.md
 
-
 ```python
 from fastogb import FullyCorrective, GeneralRuleBoostingEstimator, OrthogonalBoostingObjective, load_csv
 
@@ -33,28 +32,41 @@ predictions = model.predict(data)
 probabilities = model.predict_proba(data)
 ```
 
-Repeated `fit` calls now preserve existing rules automatically. An undersized ensemble grows towards `num_rules`;
-an ensemble already at its target updates only its coefficients by default. `fit_initial_rules` explicitly starts
-again. Explicit legacy `has_origin_rules=False` still resets the model, and `True` retains its grow-only meaning.
+## Adapting a trained ensemble
 
-The weight updater owns the adaptation learning rate. Initial fitting always uses undamped coefficient calculations;
-`FullyCorrective(learning_rate=0.1)` moves towards the joint coefficient optimum during subsequent updates. Its
-`fixed_prefix=None` default preserves the fixed default rule; explicit `fixed_prefix=0` includes that coefficient in
-optimisation. Replacement is opt-in through a function accepting an ensemble and returning rule indices:
+Repeated `fit` calls preserve existing rules automatically: an undersized ensemble grows towards `num_rules`, while an ensemble already at its target updates its coefficients by default. To adapt coefficients without changing queries, configure a weight updater and call `update_weights` with the new observations and targets. `FullyCorrective(learning_rate=0.1)` moves ten per cent of the way towards its proposed coefficient optimum on each update; initial fitting always uses an undamped step. The new arrays must preserve the original feature names, column order and numeric or categorical roles. The following example continues the logistic model above and reads a second CSV with the same schema. The configured updater receives the estimator's loss and regularisation automatically.
+
+```python
+model.set_params(weight_update_method=FullyCorrective(learning_rate=0.1))
+new_data, new_target, new_feature_names, _ = load_csv('new_data.csv', target_name='target',
+                                                    target_map={'negative': -1.0, 'positive': 1.0})
+if tuple(new_feature_names) != tuple(feature_names):
+    raise ValueError('The update CSV must preserve feature names and column order')
+model.update_weights(new_data, new_target)
+print(model.rules_)
+```
+
+Rule replacement is requested explicitly through `replace_rules` or through a selector passed to automatic `fit`. The built-in `smallest_absolute_weight` selector chooses one eligible learned conjunction with the smallest absolute coefficient, leaving default and linear terms structurally protected. A selector receives a deep-copied ensemble and returns a list of unique zero-based indices into the full ensemble. No preliminary coefficient refit is performed by replacement, and the estimator imposes no additional loss-acceptance condition. The direct call below requests selection immediately; a selector supplied to `fit` is consulted only after the ensemble has reached its requested learned-rule count. The configured learning rate applies to coefficient calculations during replacement, with each newly added rule starting its interpolation from coefficient zero.
 
 ```python
 from fastogb import smallest_absolute_weight
 
-model.update_weights(data, target)
-model.fit(data, target, replacement_selector=smallest_absolute_weight)
-model.fit_initial_rules(data, target)
+model.replace_rules(new_data, new_target, replacement_selector=smallest_absolute_weight)
+print(model.last_update_['removed_indices'])
+print(model.rules_)
 ```
 
-The default `no_replacement` function returns `[]`. Custom selectors own their selection criteria, including any
-loss-based calculations, and the estimator adds no separate loss-acceptance filter. Default and linear terms are
-protected from replacement. Refresh external `RuleEnsembleCollection` objects after models change, using
-`set_members` when parallel training returns replacement estimator objects.
+Custom criteria can impose an additional condition on the eligible rule, select several rules, or evaluate removal risk using captured data and a loss function. The alternative below replaces the weakest rule only when its absolute coefficient is below a chosen threshold. Returning `[]` keeps all queries and still requests a coefficient update through the configured updater; `None` is invalid. To discard the existing structure deliberately, use the separate `model.fit_initial_rules(new_data, new_target)` reset operation. Explicit legacy `has_origin_rules=False` also resets the model, while `True` retains grow-only continuation. The [task-based examples][estimator-tasks] cover multiple-rule and loss-based criteria, model growth, loss and search choices, linear terms, feature exclusion, diagnostics and collection refresh.
 
+```python
+def replace_weakest_rule(ensemble):
+    indices = smallest_absolute_weight(ensemble)
+    return indices if indices and abs(ensemble[indices[0]].y) < 0.05 else []
+
+model.replace_rules(new_data, new_target, replacement_selector=replace_weakest_rule)
+```
+
+[estimator-tasks]: https://github.com/fyan102/fastogb/blob/main/docs/general_rule_boosting_estimator.md#task-based-examples
 
 ## Citation
 
